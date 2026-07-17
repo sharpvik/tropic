@@ -14,17 +14,13 @@ One command:
 curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh | sudo bash
 ```
 
-By default this deploys with **Docker** — it installs Docker if needed, builds the image,
-provisions your config, and runs `docker compose up -d`. The container runs the agent with
-full privileges inside its own sandbox, so Claude can build/test freely (install packages,
-write caches) without the host permission and systemd-sandbox issues a bare-metal service
-hits. Then it **prints the GitLab-side checklist and waits for you to press ENTER** before a
+It deploys with **Docker Compose** — installs Docker if needed, builds the image, provisions
+your config, and starts two containers: the **agent** (runs Claude with full privileges
+inside its sandbox, so it can build/test freely — install packages, write caches — without
+host permission issues) and **Caddy** (terminates TLS and reverse-proxies to the agent).
+Then it **prints the GitLab-side checklist and waits for you to press ENTER** before a
 connectivity self-test. (To pass flags through a piped run, append `-s -- <flags>`, e.g.
-`… | sudo bash -s -- --domain agent.example.com`.)
-
-Prefer a bare-metal **systemd** service instead? Add `--native` (installs Node + a
-dedicated `claude-agent` user + the unit). Note the native service runs unprivileged, so
-repo builds that need `sudo`/system packages won't work there — Docker is recommended.
+`… | sudo bash -s -- --domain agent.example.com --project group/repo`.)
 
 ### Bot identity: auto-created bot user (default)
 
@@ -40,22 +36,17 @@ bot token is persisted). You'll be prompted for:
 
 (the webhook secret is auto-generated). Requires an **instance admin** token. If you don't
 have one, supply a pre-made token with `--bot-token` instead (you'll be asked for
-`GITLAB_BOT_TOKEN` + `CLAUDE_BOT_USERNAME`). If you're on Premium/Ultimate and prefer a
-service account, use `--service-account` (or `--group <id>` for a group-level one).
+`GITLAB_BOT_TOKEN` + `CLAUDE_BOT_USERNAME`).
 
 Flags (see `DESIGN.md` §14):
 
 - `--bot-token` — supply a pre-made api-scoped token instead of creating the bot user
-- `--service-account` — create a service account (needs GitLab Premium/Ultimate)
-- `--group <id>` — create a group-level service account (implies `--service-account`)
-- `--project <id|group/repo>` — auto-wire a project: add the bot as Developer **and**
-  create the Issues webhook (repeatable). With this, the install is fully hands-off — no
-  manual GitLab UI steps.
-- `--native` — install as a systemd service instead of Docker (unprivileged; no `sudo`)
-- `--docker` — force the Docker deployment (the default)
-- `--repo <git-url>` — source repo to clone (defaults to this project; for forks/local paths)
+- `--project <id|group/repo>` — add the bot as Developer to a project **and** create/update
+  its Issues webhook (repeatable). With this, the install is fully hands-off.
+- `--group <id|group/repo>` — add the bot as a Developer member of a whole group, granting
+  access to every project in it (repeatable). Webhooks are still per-project (`--project`).
+- `--domain example.com` — serve HTTPS for this domain via the Caddy container (auto cert)
 - `--ref <git-ref>` — branch/tag to install (default `main`)
-- `--domain example.com` — provision a Caddy TLS reverse proxy + real cert
 - `--uninstall [--purge]` — remove the deployment
 
 ### Get HTTPS for the webhook
@@ -73,17 +64,15 @@ curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh \
 ### If the repo is private
 
 Both the `curl` of `install.sh` and the `git clone` inside it need auth. Either make the
-repo public, embed a token in the clone URL (`--repo https://<token>@github.com/sharpvik/tropic.git`),
-or copy the files to the VM and run the script from a local path:
+repo public, set `REPO_URL` to a token-embedded clone URL, or copy the files to the VM and
+run from a local path:
 
 ```bash
 scp -r ./tropic user@vm:/tmp/tropic
 ssh user@vm 'sudo REPO_URL=/tmp/tropic bash /tmp/tropic/install.sh'
 ```
 
-### Manage the service
-
-Docker (default):
+### Manage the deployment
 
 ```bash
 cd /opt/gitlab-claude-agent
@@ -92,24 +81,15 @@ docker compose restart       # restart
 docker compose ps            # status
 ```
 
-Native (`--native`):
-
-```bash
-journalctl -u gitlab-claude-agent -f    # logs
-systemctl restart gitlab-claude-agent   # restart
-```
-
 ### Update to the latest version
 
 ```bash
-sudo bash /opt/gitlab-claude-agent/update.sh
-# or from anywhere:
-curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/update.sh | sudo bash
+cd /opt/gitlab-claude-agent
+sudo git pull
+sudo docker compose --env-file /etc/gitlab-claude-agent.env up -d --build
 ```
 
-`update.sh` pulls the latest code, rebuilds, redeploys the systemd unit (or rebuilds the
-Docker image), restarts the service, and health-checks it. It auto-detects native vs.
-Docker deployments and leaves your `.env` untouched.
+Pulls the latest code and rebuilds/restarts the containers. Your `.env` is untouched.
 
 ## VM sizing
 

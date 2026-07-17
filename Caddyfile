@@ -1,0 +1,6 @@
+# Site address is injected via the SITE_ADDRESS env var (set by install.sh):
+#   - a domain (e.g. agent.example.com) → Caddy auto-provisions a Let's Encrypt cert
+#   - ":80"                             → plain HTTP (no domain / behind another proxy)
+{$SITE_ADDRESS} {
+	reverse_proxy agent:8080
+}

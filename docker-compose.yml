@@ -1,18 +1,37 @@
 services:
   agent:
     build: .
-    # Or pull a published image instead of building:
-    # image: ghcr.io/your-org/gitlab-claude-agent:latest
     image: gitlab-claude-agent:latest
     restart: unless-stopped
-    ports:
-      - "8080:8080"
     env_file:
       - gitlab-claude-agent.env
+    # Not published publicly — Caddy reverse-proxies to it over the compose network.
+    # Bound to localhost only so the host can run health checks.
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       - claude-data:/data
       - claude-workspaces:/workspaces
 
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - agent
+    # SITE_ADDRESS = your domain (auto-HTTPS via Let's Encrypt) or ":80" (plain HTTP).
+    # Comes from gitlab-claude-agent.env; defaults to :80 if unset.
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
 volumes:
   claude-data:
   claude-workspaces:
+  caddy-data:
+  caddy-config:

@@ -102,11 +102,10 @@ gitlab-claude-agent/
 ├─ workspaces/            # per-repo checkouts (gitignored)
 ├─ data/queue.json        # persisted queue state (gitignored)
 ├─ .env.example
-├─ install.sh             # one-command installer (curl | bash) — see §14
-├─ update.sh              # pull + rebuild + redeploy + restart
-├─ Dockerfile             # container image — see §15
-├─ docker-compose.yml     # one-command run with a persisted volume
-├─ systemd/gitlab-claude-agent.service
+├─ install.sh             # one-command Docker installer (curl | bash) — see §14
+├─ Dockerfile             # agent container image — see §15
+├─ docker-compose.yml     # agent + caddy services with persisted volumes
+├─ Caddyfile              # TLS reverse proxy config (agent ← caddy)
 ├─ package.json
 └─ README.md
 ```
@@ -213,17 +212,14 @@ WORKSPACES_DIR=./workspaces
 
 ## 10. Operations
 
-- **Install:** one command on a fresh Ubuntu VM — see **§14**. Two supported deployment
-  shapes: (a) native install under `systemd`, (b) Docker container. §14 covers both.
-- **Process supervision:** `systemd` unit (provided) — `Restart=always`, runs as a
-  dedicated `claude-agent` user, `EnvironmentFile=/etc/gitlab-claude-agent.env`.
-- **Sandboxing is intentionally light in the native unit.** Claude executes arbitrary
-  build/test commands in the worktree and needs free filesystem access (a writable `HOME`
-  for `~/.claude` + toolchain caches, `/tmp`, the repo). So the unit keeps only
-  `NoNewPrivileges` + `PrivateTmp` + the unprivileged user; it does **not** set
-  `ProtectHome`/`ProtectSystem`/`ReadWritePaths` (those disable the agent's Bash tool). If
-  you need real isolation, run the Docker image or per-job containers (§9, §15) rather than
-  tightening the systemd unit — a locked-down unit and a working agent are at odds.
+- **Install:** one command on a fresh Ubuntu VM — see **§14**. Deployment is **Docker only**
+  (`docker compose`): an `agent` container plus a `caddy` container for TLS. There is no
+  native/systemd path.
+- **Process supervision:** Docker (`restart: unless-stopped`). The agent reads its config
+  from `gitlab-claude-agent.env` (compose `env_file`).
+- **Privileges:** the agent runs as **root inside its container** so Claude's Bash tool can
+  install packages and build/test with a writable `HOME` and `/tmp`. The container — not
+  dropped privileges — is the isolation boundary; the host is untouched.
 - **Logging:** structured JSON (pino) → journald; one correlation id per job.
 - **Health:** `GET /healthz` for a load balancer / uptime check.
 - **Backpressure:** if the queue exceeds a threshold, new webhooks still 200 but the job
@@ -237,8 +233,8 @@ WORKSPACES_DIR=./workspaces
 
 The bot identity is a **regular GitLab user** by default — the installer creates it and its
 `api`-scoped token for you from a one-time admin token (never stored), which works on all
-tiers. See §14.2. Use `--service-account` (Premium) or `--bot-token` (do steps 1–2 yourself)
-as alternatives.
+tiers. See §14.2. Use `--bot-token` (supply a pre-made token, doing steps 1–2 yourself) as
+the alternative.
 
 1. *(auto / manual)* A bot identity (`claude-bot`) with an `api`-scoped token. Add it to
    target projects (or the group) as **Developer** so it can be assigned issues + push.
@@ -276,8 +272,8 @@ as alternatives.
 5. GitLab client (comment, open MR).
 6. Claude Agent SDK integration + guard rails.
 7. End-to-end dry run on one test project.
-8. systemd unit + README + hardening pass.
-9. `install.sh` + `Dockerfile` + `docker-compose.yml` (§14, §15).
+8. README + hardening pass.
+9. `install.sh` + `Dockerfile` + `docker-compose.yml` + `Caddyfile` (§14, §15).
 
 ---
 
@@ -289,10 +285,7 @@ idempotent (safe to re-run), interactive only where a human decision is unavoida
 (secrets), and prints the exact GitLab-side steps it cannot do itself — then waits for
 `ENTER` before finishing.
 
-**Deployment default: Docker.** The container is the isolation boundary, so the agent runs
-with full privileges inside it — Claude can install packages, build, and test without the
-host sandbox/permission problems an unprivileged systemd service hits. `--native` selects
-the systemd path instead (unprivileged; no `sudo` in repo builds).
+Deployment is **Docker only** — an `agent` container plus a `caddy` container for TLS.
 
 ### 14.1 The one command
 
@@ -300,188 +293,98 @@ the systemd path instead (unprivileged; no `sudo` in repo builds).
 curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh | sudo bash
 ```
 
-That's it. For the security-conscious, the equivalent two-step (inspect, then run):
-
-```bash
-curl -fsSL https://.../install.sh -o install.sh && less install.sh && sudo bash install.sh
-```
+Pass flags through a piped run with `-s --`, e.g.
+`… | sudo bash -s -- --domain agent.example.com --project group/repo`.
 
 ### 14.2 What `install.sh` does
 
 Runs as root; fails fast (`set -euo pipefail`) with a clear message on any error.
 
-1. **Preflight** — confirm Ubuntu + apt, x86_64/arm64, outbound network. Refuse politely
-   on unsupported distros with a pointer to the Docker path (§15).
-2. **System packages** — `apt-get update && apt-get install -y git curl ca-certificates`.
-   Install Node.js LTS from NodeSource (or nvm-less system Node) and `nodejs`+`npm`.
-3. **Dedicated user** — create unprivileged `claude-agent` user + `/opt/gitlab-claude-agent`
-   home; never run the service as root.
-4. **Fetch the app** — clone the repo (pinned tag/`main`) into `/opt/gitlab-claude-agent`,
-   `npm ci --omit=dev`, `npm run build`.
-5. **Interactive config** — if `/etc/gitlab-claude-agent.env` doesn't exist, prompt for the
-   handful of required values and write it `chmod 600`, owned by `claude-agent`:
+1. **Preflight** — confirm Ubuntu + apt.
+2. **System packages** — `git curl ca-certificates openssl jq` (for the clone + the GitLab
+   provisioning API calls).
+3. **Clean up legacy** — remove any old native systemd unit / host Caddy that would fight the
+   containers for ports 80/443/8080.
+4. **Fetch the app** — clone the repo (pinned `--ref`, default `main`) into
+   `/opt/gitlab-claude-agent`.
+5. **Interactive config** — if `/etc/gitlab-claude-agent.env` doesn't exist, prompt and write
+   it `chmod 600`:
    - `GITLAB_BASE_URL`
-   - **Bot identity — a regular bot user by default (works on all tiers).** The installer
-     prompts for a one-time **admin token**, then calls the admin API to create a regular
-     user (`POST /users`) and an `api`-scoped token for it
+   - **Bot identity — a regular bot user by default (works on all tiers).** Prompts for a
+     one-time **admin token**, then calls the admin API to create a regular user
+     (`POST /users`) and an `api`-scoped token for it
      (`POST /users/:id/personal_access_tokens`). The admin token is used only during install
      and is **never written to disk**; only the resulting bot token is persisted as
-     `GITLAB_BOT_TOKEN`, and `CLAUDE_BOT_USERNAME` is set to the created username. Alternatives:
-     `--service-account` uses the service-accounts API instead (needs Premium/Ultimate);
-     `--group <id>` makes a group service account (needs group Owner + Premium); `--bot-token`
+     `GITLAB_BOT_TOKEN`, with `CLAUDE_BOT_USERNAME` set to the created username. `--bot-token`
      skips creation and prompts for a pre-made `GITLAB_BOT_TOKEN` + `CLAUDE_BOT_USERNAME`.
    - `ANTHROPIC_API_KEY`  (input hidden)
-   - `GITLAB_WEBHOOK_SECRET` — **auto-generated** with `openssl rand -hex 32` if left blank
-     (script echoes the generated value so the operator can paste it into GitLab).
-   Non-interactive mode: honor these same vars if already present in the environment, so
-   the script works in cloud-init / Ansible with zero prompts.
-6. **Install the systemd unit** — drop `gitlab-claude-agent.service`, `systemctl
-   daemon-reload`, `enable --now`. Verify it reached `active (running)` and that
-   `GET /healthz` returns 200; otherwise dump the last 20 journald lines and exit non-zero.
-7. **Print GitLab-side setup + pause** — print the exact, copy-pasteable checklist below,
-   filled in with this VM's values (public URL/IP, the webhook secret), then:
-
-   ```
-   ⏸  Complete the GitLab steps above, then press ENTER to run a connectivity self-test…
-   ```
-
-   The script blocks on `read` until the operator confirms.
-8. **Self-test** — after ENTER, optionally hit the GitLab API with the bot token to confirm
-   the token is valid and has `api` scope; report ✅/❌. Print the service status, log
-   command (`journalctl -u gitlab-claude-agent -f`), and the webhook URL. Done.
+   - `GITLAB_WEBHOOK_SECRET` — **auto-generated** with `openssl rand -hex 32`.
+   - `SITE_ADDRESS` — set from `--domain` (auto-HTTPS) or `:80` (plain HTTP); drives Caddy.
+6. **Deploy** — install Docker Engine if absent, then `docker compose up -d --build` to start
+   the `agent` + `caddy` containers. Verify `GET /healthz` (agent bound on `127.0.0.1:8080`).
+7. **Wire GitLab** — `--group`/`--project` add the bot as a member and (for projects) create
+   or update the Issues webhook via the API, using the one-time admin token.
+8. **Print checklist + pause** — print any remaining manual GitLab steps (filled with this
+   VM's URL + secret), block on `ENTER`, then run a self-test (`/healthz` + bot token valid).
 
 ### 14.3 The GitLab-side checklist the script prints
 
-The bot user + token are created automatically (default mode). What remains is adding that
-user to the projects and wiring the webhook — steps that need a human in the GitLab UI (the
-installer doesn't know which projects to target). So `install.sh` prints:
+If `--project` fully wired everything, the checklist just says *"All set."* Otherwise it
+prints the remaining manual steps:
 
 ```
-════════════════════════ GitLab setup (do this now) ════════════════════════
-1. Done for you: bot user "claude-bot" and its api token were created.
-      → Add "claude-bot" to each target project (or group) as Developer
-        (Members → Invite) so it can be assigned issues and push branches.
-2. In each project (or the group):  Settings → Webhooks → Add webhook
-      URL:           http://<THIS_VM_PUBLIC_URL>/webhook
+════════════════════════ GitLab setup ════════════════════════
+ 1. Done for you: bot "claude-bot" and its api token were created.
+      → Add "claude-bot" as Developer to each target project (or group).
+ 2. In each project (or group):  Settings → Webhooks → Add webhook
+      URL:           https://<DOMAIN>/webhook   (or http://<VM_IP>/webhook)
       Secret token:  <GENERATED_WEBHOOK_SECRET>
-      Trigger:       ☑ Issues events     (leave everything else unchecked)
-      SSL verify:    ☑ (recommended — put a TLS proxy in front, see README)
-3. (Optional) Add a CLAUDE.md to each repo with your coding standards.
-═════════════════════════════════════════════════════════════════════════════
+      Trigger:       ☑ Issues events   (leave everything else unchecked)
+      SSL verify:    ☑ if you used --domain
+ 3. (Optional) Add a CLAUDE.md to each repo with your coding standards.
+═══════════════════════════════════════════════════════════════
 ```
 
-(With `--service-account` step 1 creates a service account instead; with `--bot-token` it
-reminds you to create the bot user + token yourself.)
-
-**Fully hands-off:** pass `--project <id|group/repo>` (repeatable) and the installer, while
-it still holds the one-time admin token, adds the bot to that project as **Developer** and
-creates the **Issues webhook** via the API (`POST /projects/:id/members` and
-`POST /projects/:id/hooks`) — idempotently (existing webhooks with the same URL are left
-alone). With `--project`, steps 1–2 of the checklist are done automatically and nothing is
-left to do in the GitLab UI.
-
-> TLS note: for `https://` webhooks with SSL verification, run a reverse proxy (Caddy gets
-> you an auto-Let's-Encrypt cert in ~2 lines). The installer can offer to set this up when a
-> `--domain <fqdn>` flag is passed; otherwise it defaults to plain `:8080` and tells the
-> operator to front it themselves.
+**Wiring flags** (use the one-time admin token, idempotent, re-run-safe):
+- `--project <id|group/repo>` — add the bot as **Developer** on the project
+  (`POST /projects/:id/members`) and **create or update** its Issues webhook
+  (`POST`/`PUT /projects/:id/hooks`). The update path re-syncs the secret, so a rotated
+  `GITLAB_WEBHOOK_SECRET` can't drift out of sync.
+- `--group <id|group/repo>` — add the bot as **Developer** on a whole group
+  (`POST /groups/:id/members`), granting access to every project in it. Webhooks stay
+  per-project (group webhooks are a Premium feature and aren't used here).
 
 ### 14.4 Uninstall
 
-`install.sh --uninstall` stops + removes the running deployment (systemd unit and/or the
-Docker container) but **keeps** the repo (`/opt/gitlab-claude-agent`), the config
-(`/etc/gitlab-claude-agent.env`), the `claude-agent` user, and the data — so a reinstall is
-just `sudo bash /opt/gitlab-claude-agent/install.sh` with no re-clone or re-provisioning.
+`install.sh --uninstall` stops + removes the containers but **keeps** the repo
+(`/opt/gitlab-claude-agent`), config (`/etc/gitlab-claude-agent.env`), and Docker volumes —
+so a reinstall is just `sudo bash /opt/gitlab-claude-agent/install.sh`, no re-clone or
+re-provisioning.
 
-`--purge` (with `--uninstall`) is the full wipe: repo, config, user, and Docker volumes. It
+`--purge` (with `--uninstall`) is the full wipe: repo, config, and Docker volumes. It
 re-execs from `/tmp` first so it can safely delete the app dir containing the script.
+
+Updating is `git pull` + `docker compose up -d --build` in `/opt/gitlab-claude-agent`.
 
 ---
 
 ## 15. Docker
 
-For operators who'd rather not touch the host, a container is the fastest path and also the
-recommended isolation boundary (§9 blast radius). The image bundles Node, git, and the
-Claude Code CLI so a job's Bash calls have a toolchain available.
+Deployment runs two containers via `docker-compose.yml`:
 
-### 15.1 Dockerfile (sketch)
+- **`agent`** — the Node service. Built from the multi-stage `Dockerfile` (compile TS in a
+  full image, run on a slim base). Runs as **root** with a writable `HOME` and build tooling
+  (`build-essential`, `python3`, `git`, `curl`, the Claude Code CLI) so Claude's Bash tool
+  can install packages and build/test freely. Bound to `127.0.0.1:8080` (not public).
+- **`caddy`** — `caddy:2`, publishes `:80`/`:443`, reverse-proxies to `agent:8080`. Its site
+  address comes from `SITE_ADDRESS` (a domain → auto Let's Encrypt cert; `:80` → plain HTTP),
+  driven by the `Caddyfile`.
 
-Multi-stage: build TypeScript in a full image, run on a slim base as a non-root user.
+### 15.1 Notes
 
-```dockerfile
-# ---- build stage ----
-FROM node:22-bookworm-slim AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm run build          # → dist/
-
-# ---- runtime stage ----
-FROM node:22-bookworm-slim
-# git is required for the worktree pipeline; ca-certificates for HTTPS push/API
-RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-# Claude Code CLI available for the agent's Bash tool
-RUN npm install -g @anthropic-ai/claude-code
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY --from=build /app/dist ./dist
-# non-root
-RUN useradd --create-home --uid 10001 claude \
- && mkdir -p /data /workspaces && chown -R claude /data /workspaces /app
-USER claude
-ENV NODE_ENV=production \
-    PORT=8080 \
-    WORKSPACES_DIR=/workspaces
-VOLUME ["/data", "/workspaces"]
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
-  CMD node -e "fetch('http://localhost:'+ (process.env.PORT||8080) +'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-ENTRYPOINT ["node", "dist/index.js"]
-```
-
-### 15.2 Run it
-
-```bash
-docker run -d --name gitlab-claude-agent \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  --env-file gitlab-claude-agent.env \
-  -v claude-data:/data \
-  -v claude-workspaces:/workspaces \
-  ghcr.io/<org>/gitlab-claude-agent:latest
-```
-
-Or via `docker-compose.yml` (`docker compose up -d`):
-
-```yaml
-services:
-  agent:
-    image: ghcr.io/<org>/gitlab-claude-agent:latest
-    restart: unless-stopped
-    ports: ["8080:8080"]
-    env_file: gitlab-claude-agent.env
-    volumes:
-      - claude-data:/data
-      - claude-workspaces:/workspaces
-volumes:
-  claude-data:
-  claude-workspaces:
-```
-
-### 15.3 Notes
-
-- **Persisted state:** `/data` (queue) and `/workspaces` (repo mirrors) are named volumes so
-  the queue backlog and cached clones survive `docker restart`/image upgrades.
-- **`install.sh` (Docker is the default):** installs Docker Engine if absent, writes the
-  `.env`, builds the image, and starts the compose stack, then prints the GitLab checklist +
-  ENTER pause (§14.3). `--native` switches to the systemd path.
-- **Runs as root inside the container.** The container is the isolation boundary, so the
-  agent runs privileged within it — Claude's Bash can install packages and build/test freely,
-  with a writable `HOME` (`~/.claude` + toolchain caches). The host is protected by the
-  container, not by dropping privileges inside it.
-- **Per-job isolation (future):** §12 open question 2 — for many-repo deployments, run each
-  job in an ephemeral child container so a repo's Bash can't see the service or other repos.
+- **Persisted state:** named volumes — `claude-data` (`/data` queue), `claude-workspaces`
+  (`/workspaces` repo mirrors), and `caddy-data`/`caddy-config` (certs) — survive restarts
+  and image rebuilds.
+- **Isolation:** the container, not dropped in-container privileges, is the boundary; the
+  host is untouched. For many-repo deployments, a future step is per-job ephemeral child
+  containers (§12 open question 2).

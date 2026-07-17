@@ -42,6 +42,9 @@ Flags (see `DESIGN.md` §14):
 - `--bot-token` — supply a pre-made api-scoped token instead of creating the bot user
 - `--service-account` — create a service account (needs GitLab Premium/Ultimate)
 - `--group <id>` — create a group-level service account (implies `--service-account`)
+- `--project <id|group/repo>` — auto-wire a project: add the bot as Developer **and**
+  create the Issues webhook (repeatable). With this, the install is fully hands-off — no
+  manual GitLab UI steps.
 - `--repo <git-url>` — source repo to clone (defaults to a placeholder; set this)
 - `--ref <git-ref>` — branch/tag to install (default `main`)
 - `--domain example.com` — provision a Caddy TLS reverse proxy + real cert

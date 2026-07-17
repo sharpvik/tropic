@@ -15,6 +15,8 @@
 #                       (requires GitLab Premium/Ultimate).
 #   --group <id>        Create a GROUP service account under this group id (implies
 #                       --service-account; needs group Owner + Premium).
+#   --project <id|path> Auto-wire this project: add the bot as Developer AND create
+#                       the Issues webhook. Repeatable. (Uses the one-time admin token.)
 #   --docker            Install via Docker instead of a native systemd service.
 #   --domain <fqdn>     Set up a Caddy TLS reverse proxy for this domain.
 #   --repo <git-url>    Override the source repo to clone (native install).
@@ -44,6 +46,8 @@ DO_PURGE=0
 #   token            — you supply a pre-made api-scoped token + username
 PROVISION_MODE="user"
 GITLAB_GROUP_ID=""   # if set, create a group service account instead of instance-level
+PROJECTS=()          # projects to auto-wire (add bot as Developer + create webhook)
+BOT_USER_ID=""       # id of the created/looked-up bot user, for membership
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -92,6 +96,7 @@ parse_args() {
       --bot-token) PROVISION_MODE="token" ;;
       --service-account) PROVISION_MODE="service-account" ;;
       --group) PROVISION_MODE="service-account"; GITLAB_GROUP_ID="$2"; shift ;;
+      --project) PROJECTS+=("$2"); shift ;;
       --uninstall) DO_UNINSTALL=1 ;;
       --purge) DO_PURGE=1 ;;
       *) die "Unknown flag: $1" ;;
@@ -245,6 +250,7 @@ provision_admin_user() {
     die "Re-run with --bot-token to supply a pre-made token instead."
   fi
   CLAUDE_BOT_USERNAME="$sa_user"
+  BOT_USER_ID="$uid"
   info "Bot user '${sa_user}' ready (id ${uid})."
 
   info "Creating an api-scoped token for the bot user…"
@@ -253,7 +259,8 @@ provision_admin_user() {
   GITLAB_BOT_TOKEN="$(echo "$GL_BODY" | jq -r '.token // empty' 2>/dev/null)"
   [ -n "$GITLAB_BOT_TOKEN" ] || die "Bot user created but token generation failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
   info "Bot token created."
-  unset GITLAB_ADMIN_TOKEN ADMIN_TOKEN
+  # ADMIN_TOKEN is kept in memory for optional --project setup; scrubbed in main().
+  unset GITLAB_ADMIN_TOKEN
 }
 
 # Create a GitLab service account and an api-scoped token for it, using a
@@ -307,6 +314,7 @@ provision_service_account() {
     die "Re-run with --bot-token."
   fi
   CLAUDE_BOT_USERNAME="$(echo "$GL_BODY" | jq -r '.username')"
+  BOT_USER_ID="$sa_id"
   info "Created service account '${CLAUDE_BOT_USERNAME}' (id ${sa_id})."
 
   info "Creating an api-scoped token for the service account…"
@@ -321,8 +329,8 @@ provision_service_account() {
   GITLAB_BOT_TOKEN="$(echo "$GL_BODY" | jq -r '.token // empty' 2>/dev/null)"
   [ -n "$GITLAB_BOT_TOKEN" ] || die "Service account created but token generation failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
   info "Service account token created."
-  # Scrub the admin token from the environment.
-  unset GITLAB_ADMIN_TOKEN ADMIN_TOKEN admin
+  # ADMIN_TOKEN is kept in memory for optional --project setup; scrubbed in main().
+  unset GITLAB_ADMIN_TOKEN admin
 }
 
 GENERATED_SECRET=""
@@ -468,6 +476,61 @@ public_url() {
   echo "http://${ip:-<THIS_VM_IP>}:8080"
 }
 
+# For each --project, add the bot as Developer and create the Issues webhook, via
+# the API. Membership needs the admin token (kept from provisioning); webhook
+# creation uses admin token when available, else the bot token (needs Maintainer).
+PROJECTS_FULLY_WIRED=0
+setup_projects() {
+  [ "${#PROJECTS[@]}" -gt 0 ] || return 0
+  local hook_url token enc ssl existing member_ok hook_ok
+  hook_url="$(public_url)/webhook"
+  token="${ADMIN_TOKEN:-$GITLAB_BOT_TOKEN}"
+  ssl="false"; [ -n "$DOMAIN" ] && ssl="true"
+
+  echo
+  info "Wiring ${#PROJECTS[@]} project(s): bot membership + Issues webhook…"
+  for p in "${PROJECTS[@]}"; do
+    enc="${p//\//%2F}"   # url-encode a "group/repo" path; numeric ids pass through
+    member_ok=0; hook_ok=0
+
+    # 1. Add the bot as Developer (access_level 30). Requires admin token.
+    if [ -n "${ADMIN_TOKEN:-}" ] && [ -n "$BOT_USER_ID" ]; then
+      gl_api POST "/projects/${enc}/members" "$ADMIN_TOKEN" \
+        --data-urlencode "user_id=${BOT_USER_ID}" --data-urlencode "access_level=30"
+      case "$GL_CODE" in
+        201) info "  [${p}] added '${CLAUDE_BOT_USERNAME}' as Developer."; member_ok=1 ;;
+        409) info "  [${p}] '${CLAUDE_BOT_USERNAME}' is already a member."; member_ok=1 ;;
+        *)   warn "  [${p}] could not add member (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY")). Add it manually." ;;
+      esac
+    else
+      warn "  [${p}] no admin token available — add '${CLAUDE_BOT_USERNAME}' as Developer manually."
+    fi
+
+    # 2. Create the Issues webhook (idempotent: skip if one with this URL exists).
+    gl_api GET "/projects/${enc}/hooks" "$token"
+    existing=""
+    [ "$GL_CODE" = "200" ] && existing="$(echo "$GL_BODY" | jq -r --arg u "$hook_url" '.[] | select(.url==$u) | .id' 2>/dev/null | head -n1)"
+    if [ -n "$existing" ]; then
+      info "  [${p}] webhook already present (id ${existing})."
+      hook_ok=1
+    else
+      gl_api POST "/projects/${enc}/hooks" "$token" \
+        --data-urlencode "url=${hook_url}" \
+        --data-urlencode "token=${GITLAB_WEBHOOK_SECRET}" \
+        --data-urlencode "issues_events=true" \
+        --data-urlencode "push_events=false" \
+        --data-urlencode "enable_ssl_verification=${ssl}"
+      if [ "$GL_CODE" = "201" ]; then
+        info "  [${p}] Issues webhook created → ${hook_url}"; hook_ok=1
+      else
+        warn "  [${p}] could not create webhook (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY")). Add it manually."
+      fi
+    fi
+
+    [ "$member_ok" = 1 ] && [ "$hook_ok" = 1 ] && PROJECTS_FULLY_WIRED=$((PROJECTS_FULLY_WIRED+1))
+  done
+}
+
 print_gitlab_checklist() {
   local url secret bot
   url="$(public_url)"
@@ -475,28 +538,32 @@ print_gitlab_checklist() {
   bot="${CLAUDE_BOT_USERNAME:-claude-bot}"
 
   echo
-  echo "${c_bold}════════════════════════ GitLab setup (do this now) ════════════════════════${c_reset}"
+  echo "${c_bold}════════════════════════ GitLab setup ════════════════════════${c_reset}"
+
+  # If every requested project was fully wired, there's nothing left to do.
+  if [ "${#PROJECTS[@]}" -gt 0 ] && [ "$PROJECTS_FULLY_WIRED" -eq "${#PROJECTS[@]}" ]; then
+    cat <<EOF
+ ${c_green}All set — nothing to do.${c_reset}
+   • Bot user/token: created  (${bot})
+   • Membership + Issues webhook: created on ${PROJECTS_FULLY_WIRED} project(s)
+
+ Try it: assign an issue to "${bot}" and watch for a "👋 On it" comment.
+ (Optional) Add a CLAUDE.md to each repo with your coding standards.
+${c_bold}══════════════════════════════════════════════════════════════${c_reset}
+
+EOF
+    return
+  fi
+
+  # Otherwise, print what still needs a human.
+  echo " Remaining manual steps:"
   case "$PROVISION_MODE" in
-    user)
-      cat <<EOF
- 1. ${c_green}Done for you:${c_reset} bot user "${bot}" and its api token were created.
-    → Add "${bot}" to each target project (or group) as  Developer
-       (Members → Invite) so it can be assigned issues and push branches.
-EOF
-      ;;
-    service-account)
-      cat <<EOF
- 1. ${c_green}Done for you:${c_reset} service account "${bot}" and its api token were created.
-    → Add "${bot}" to each target project (or group) as  Developer
-       (Members → Invite) so it can be assigned issues and push branches.
-EOF
-      ;;
+    user|service-account)
+      echo " 1. ${c_green}Done for you:${c_reset} bot \"${bot}\" and its api token were created."
+      echo "    → Add \"${bot}\" to each target project (or group) as  Developer  (Members → Invite)." ;;
     *)
-      cat <<EOF
- 1. Create/confirm the bot user  "${bot}"  with an api-scoped token, and add it to
-    each target project (or group) as  Developer  (can push branches + open MRs).
-EOF
-      ;;
+      echo " 1. Create the bot user \"${bot}\" with an api-scoped token; add it to each"
+      echo "    target project (or group) as  Developer." ;;
   esac
   cat <<EOF
 
@@ -507,7 +574,9 @@ EOF
        SSL verify:    [x] recommended (needs a TLS domain — see --domain)
 
  3. (Optional) Add a CLAUDE.md to each repo with your coding standards.
-${c_bold}═════════════════════════════════════════════════════════════════════════════${c_reset}
+
+ Tip: re-run with  --project <id-or-group/repo>  to do steps 1–2 automatically.
+${c_bold}══════════════════════════════════════════════════════════════${c_reset}
 
 EOF
 }
@@ -600,6 +669,8 @@ main() {
   fi
 
   setup_caddy
+  setup_projects
+  unset ADMIN_TOKEN   # scrub the one-time admin token now that provisioning is done
   print_gitlab_checklist
   pause_for_gitlab
   self_test

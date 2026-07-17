@@ -360,6 +360,13 @@ installer doesn't know which projects to target). So `install.sh` prints:
 (With `--service-account` step 1 creates a service account instead; with `--bot-token` it
 reminds you to create the bot user + token yourself.)
 
+**Fully hands-off:** pass `--project <id|group/repo>` (repeatable) and the installer, while
+it still holds the one-time admin token, adds the bot to that project as **Developer** and
+creates the **Issues webhook** via the API (`POST /projects/:id/members` and
+`POST /projects/:id/hooks`) — idempotently (existing webhooks with the same URL are left
+alone). With `--project`, steps 1–2 of the checklist are done automatically and nothing is
+left to do in the GitLab UI.
+
 > TLS note: for `https://` webhooks with SSL verification, run a reverse proxy (Caddy gets
 > you an auto-Let's-Encrypt cert in ~2 lines). The installer can offer to set this up when a
 > `--domain <fqdn>` flag is passed; otherwise it defaults to plain `:8080` and tells the

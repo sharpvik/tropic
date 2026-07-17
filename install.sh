@@ -157,11 +157,32 @@ build_app() {
 # Configuration
 # ---------------------------------------------------------------------------
 
+# Call the GitLab API, capturing body + status separately so we can report real
+# errors. Sets GL_BODY and GL_CODE. Never uses -f (which hides the response).
+# usage: gl_api METHOD PATH TOKEN [curl args…]
+GL_BODY=""; GL_CODE=""
+gl_api() {
+  local method="$1" path="$2" token="$3"; shift 3
+  local raw
+  raw="$(curl -sS -X "$method" -w $'\n__HTTP__%{http_code}' \
+    --header "PRIVATE-TOKEN: ${token}" "$@" \
+    "${GITLAB_BASE_URL%/}/api/v4${path}" 2>&1)" || true
+  GL_CODE="${raw##*__HTTP__}"
+  GL_BODY="${raw%$'\n'__HTTP__*}"
+  case "$GL_CODE" in [0-9]*) ;; *) GL_CODE="000"; GL_BODY="$raw" ;; esac
+}
+
+# Extract a human-readable message from a GitLab error body.
+gl_err_msg() {
+  echo "$1" | jq -r '(.message // .error // .) | if type=="object" then tojson else tostring end' 2>/dev/null \
+    | head -c 300
+}
+
 # Create a GitLab service account and an api-scoped token for it, using a
 # one-time admin token that is NOT persisted anywhere. Sets GITLAB_BOT_TOKEN
 # and CLAUDE_BOT_USERNAME on success.
 provision_service_account() {
-  local base="${GITLAB_BASE_URL%/}" admin sa_name sa_user sa_path sa_json sa_id tok_json
+  local base="${GITLAB_BASE_URL%/}" admin sa_name sa_user sa_path sa_id
   echo
   info "Provisioning a GitLab service account (used once; the admin token is not stored)."
   echo
@@ -179,6 +200,19 @@ provision_service_account() {
   prompt_var SA_USERNAME "Username for the bot"     "claude-bot"
   sa_name="$SA_NAME"; sa_user="$SA_USERNAME"
 
+  # Sanity-check the token first so we can give a precise error.
+  gl_api GET /user "$admin"
+  if [ "$GL_CODE" != "200" ]; then
+    err "The admin token was rejected by ${base} (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
+    err "Check the token value and that GITLAB_BASE_URL is correct."
+    die "Re-run with --bot-token to supply a pre-made token instead."
+  fi
+  if [ -z "$GITLAB_GROUP_ID" ] && [ "$(echo "$GL_BODY" | jq -r '.is_admin // false')" != "true" ]; then
+    err "That token works, but its user is NOT an instance administrator, which is required"
+    err "to create an instance-level service account."
+    die "Re-run with  --group <id>  (group Owner + Premium) or  --bot-token."
+  fi
+
   # Instance-level by default; group-level when --group is given (needs Owner + Premium).
   if [ -n "$GITLAB_GROUP_ID" ]; then
     sa_path="/groups/${GITLAB_GROUP_ID}/service_accounts"
@@ -187,20 +221,23 @@ provision_service_account() {
   fi
 
   info "Creating service account '${sa_user}'…"
-  sa_json="$(curl -fsS -X POST \
-    --header "PRIVATE-TOKEN: ${admin}" \
-    --data-urlencode "name=${sa_name}" \
-    --data-urlencode "username=${sa_user}" \
-    "${base}/api/v4${sa_path}" 2>/dev/null)" || sa_json=""
-
-  if [ -z "$sa_json" ] || [ "$(echo "$sa_json" | jq -r '.id // empty')" = "" ]; then
-    err "Could not create the service account. The token may lack admin/owner rights,"
-    err "or your GitLab is older than 15.4. Response: $(echo "${sa_json:-<none>}" | head -c 300)"
+  gl_api POST "$sa_path" "$admin" \
+    --data-urlencode "name=${sa_name}" --data-urlencode "username=${sa_user}"
+  # Older GitLab (<16.1) doesn't accept name/username; retry with no body.
+  if [ "$GL_CODE" = "400" ]; then
+    warn "This GitLab version doesn't accept a custom username; creating with an auto-generated one."
+    gl_api POST "$sa_path" "$admin"
+  fi
+  sa_id="$(echo "$GL_BODY" | jq -r '.id // empty' 2>/dev/null)"
+  if [ -z "$sa_id" ]; then
+    err "Could not create the service account (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
+    case "$GL_CODE" in
+      403) err "The token lacks the rights to create service accounts here." ;;
+      404) err "The service-accounts API isn't available (GitLab < 15.4, or --group id wrong)." ;;
+    esac
     die "Re-run with --bot-token to supply a pre-made token instead."
   fi
-  sa_id="$(echo "$sa_json" | jq -r '.id')"
-  # GitLab may adjust the username (e.g. on collision); trust what it returns.
-  CLAUDE_BOT_USERNAME="$(echo "$sa_json" | jq -r '.username')"
+  CLAUDE_BOT_USERNAME="$(echo "$GL_BODY" | jq -r '.username')"
   info "Created service account '${CLAUDE_BOT_USERNAME}' (id ${sa_id})."
 
   info "Creating an api-scoped token for the service account…"
@@ -210,14 +247,10 @@ provision_service_account() {
   else
     tok_path="/service_accounts/${sa_id}/personal_access_tokens"
   fi
-  tok_json="$(curl -fsS -X POST \
-    --header "PRIVATE-TOKEN: ${admin}" \
-    --data-urlencode "name=gitlab-claude-agent" \
-    --data-urlencode "scopes[]=api" \
-    "${base}/api/v4${tok_path}" 2>/dev/null)" || tok_json=""
-
-  GITLAB_BOT_TOKEN="$(echo "${tok_json:-}" | jq -r '.token // empty')"
-  [ -n "$GITLAB_BOT_TOKEN" ] || die "Service account created but token generation failed: $(echo "${tok_json:-<none>}" | head -c 300)"
+  gl_api POST "$tok_path" "$admin" \
+    --data-urlencode "name=gitlab-claude-agent" --data-urlencode "scopes[]=api"
+  GITLAB_BOT_TOKEN="$(echo "$GL_BODY" | jq -r '.token // empty' 2>/dev/null)"
+  [ -n "$GITLAB_BOT_TOKEN" ] || die "Service account created but token generation failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
   info "Service account token created."
   # Scrub the admin token from the environment.
   unset GITLAB_ADMIN_TOKEN admin

@@ -81,6 +81,29 @@ docker compose restart       # restart
 docker compose ps            # status
 ```
 
+### See what the agent is doing
+
+The agent streams its activity to the logs as it works — every tool call and each
+chunk of Claude's text — so `docker compose logs -f` is a live feed:
+
+```bash
+cd /opt/tropic && docker compose logs -f agent
+```
+
+You'll see lines like `🔧 tool` (with the tool name + a one-line detail, e.g. the `Bash`
+command or the file being edited) and `💬 claude` (the assistant's text), between the
+`job started` / `job completed` markers. Filter to just the activity with:
+
+```bash
+docker compose logs -f agent | grep -E 'tool|claude|job '
+```
+
+Queue depth (how many jobs are waiting/running) is on the health endpoint:
+
+```bash
+curl -s localhost:8080/healthz    # {"status":"ok","pending":N,"active":M}
+```
+
 ### Update to the latest version
 
 ```bash

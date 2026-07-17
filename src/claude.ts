@@ -47,6 +47,51 @@ export function buildMrCommentPrompt(job: MrCommentJobPayload): string {
 
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
+function truncate(s: string, n = 200): string {
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length > n ? `${one.slice(0, n)}…` : one;
+}
+
+/** A one-line summary of a tool call's input, for the activity log. */
+function summariseToolInput(name: string, input: Record<string, any> | undefined): string {
+  if (!input) return "";
+  switch (name) {
+    case "Bash":
+      return truncate(String(input.command ?? ""), 200);
+    case "Read":
+    case "Edit":
+    case "Write":
+    case "NotebookEdit":
+      return String(input.file_path ?? input.notebook_path ?? "");
+    case "Grep":
+      return truncate(`${input.pattern ?? ""} ${input.path ? `in ${input.path}` : ""}`);
+    case "Glob":
+      return truncate(String(input.pattern ?? ""));
+    case "TodoWrite":
+      return `${(input.todos ?? []).length} todo(s)`;
+    case "Task":
+      return truncate(String(input.description ?? input.prompt ?? ""));
+    case "WebFetch":
+    case "WebSearch":
+      return truncate(String(input.url ?? input.query ?? ""));
+    default:
+      return truncate(JSON.stringify(input), 160);
+  }
+}
+
+/** Stream the agent's tool calls + text to the logs so progress is visible live. */
+function logAssistant(logger: Logger, msg: Record<string, any>): void {
+  const blocks = msg?.message?.content;
+  if (!Array.isArray(blocks)) return;
+  for (const b of blocks) {
+    if (b?.type === "tool_use") {
+      logger.info({ tool: b.name, detail: summariseToolInput(b.name, b.input) }, "🔧 tool");
+    } else if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) {
+      logger.info({ text: truncate(b.text, 300) }, "💬 claude");
+    }
+  }
+}
+
 export interface RunClaudeOptions {
   worktreeDir: string;
   /** The fully-built prompt to run. */
@@ -100,7 +145,10 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
         abortController: controller,
       } as Record<string, unknown>,
     }) as AsyncIterable<Record<string, any>>) {
-      if (msg.type === "assistant") turns += 1;
+      if (msg.type === "assistant") {
+        turns += 1;
+        logAssistant(opts.logger, msg);
+      }
       if (msg.type === "result") {
         summary = typeof msg.result === "string" ? msg.result : summary;
         if (msg.subtype && msg.subtype !== "success") ok = false;

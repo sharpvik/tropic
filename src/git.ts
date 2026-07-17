@@ -122,8 +122,11 @@ export class GitOps {
     );
     // Clean any stale worktree at that path.
     await this.removeWorktreeAt(mirror, dir).catch(() => undefined);
+    // A --mirror clone stores upstream branches as real refs (refs/heads/<branch>),
+    // so the base is the plain branch name, NOT origin/<branch> (no remote-tracking
+    // refs exist in a mirror).
     await this.git(
-      ["worktree", "add", "-b", branch, dir, `origin/${baseBranch}`],
+      ["worktree", "add", "-b", branch, dir, baseBranch],
       mirror,
     );
     // Set commit identity local to the worktree.
@@ -157,6 +160,11 @@ export class GitOps {
 
   /** Push the branch to origin. */
   async push(worktreeDir: string, branch: string): Promise<void> {
-    await this.git(["push", "-u", "origin", `${branch}:${branch}`], worktreeDir);
+    // The mirror clone sets remote.origin.mirror=true, which forbids pushing with a
+    // refspec ("--mirror can't be combined with refspecs"). Override it per-command.
+    await this.git(
+      ["-c", "remote.origin.mirror=false", "push", "-u", "origin", `${branch}:${branch}`],
+      worktreeDir,
+    );
   }
 }

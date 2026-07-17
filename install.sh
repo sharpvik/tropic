@@ -19,7 +19,8 @@
 #                       the Issues webhook. Repeatable. (Uses the one-time admin token.)
 #   --docker            Install via Docker instead of a native systemd service.
 #   --domain <fqdn>     Set up a Caddy TLS reverse proxy for this domain.
-#   --repo <git-url>    Override the source repo to clone (native install).
+#   --repo <git-url>    Override the source repo to clone (default: this project;
+#                       only needed for forks or a local path).
 #   --ref <git-ref>     Branch/tag to install (default: main).
 #   --uninstall         Stop and remove the service.
 #   --purge             With --uninstall, also remove config + data.
@@ -34,7 +35,7 @@ APP_USER="claude-agent"
 APP_DIR="/opt/${APP_NAME}"
 ENV_FILE="/etc/${APP_NAME}.env"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
-REPO_URL="${REPO_URL:-https://github.com/your-org/gitlab-claude-agent.git}"
+REPO_URL="${REPO_URL:-https://github.com/sharpvik/tropic.git}"
 REPO_REF="main"
 MODE="native"
 DOMAIN=""

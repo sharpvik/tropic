@@ -11,14 +11,13 @@ See [`DESIGN.md`](./DESIGN.md) for the full design.
 Native (systemd) install, one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh \
-  | sudo bash -s -- --repo https://github.com/sharpvik/tropic.git
+curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh | sudo bash
 ```
 
-`bash -s --` passes the flags through to the piped script. The installer sets up Node, a
-dedicated `claude-agent` user, the systemd service, and your config, then **prints the
-GitLab-side checklist and waits for you to press ENTER** before running a connectivity
-self-test.
+The installer sets up Node, a dedicated `claude-agent` user, the systemd service, and your
+config, then **prints the GitLab-side checklist and waits for you to press ENTER** before
+running a connectivity self-test. (To pass flags through a piped run, append
+`-s -- <flags>`, e.g. `… | sudo bash -s -- --domain agent.example.com`.)
 
 ### Bot identity: auto-created bot user (default)
 
@@ -60,7 +59,7 @@ the VM first, then:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh \
-  | sudo bash -s -- --repo https://github.com/sharpvik/tropic.git --domain agent.example.com
+  | sudo bash -s -- --domain agent.example.com
 ```
 
 ### If the repo is private

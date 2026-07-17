@@ -100,7 +100,6 @@ async function handleIssue(
     const result = await runClaude({
       worktreeDir: wt.dir,
       prompt: buildPrompt(issue),
-      maxTurns: config.MAX_TURNS,
       model: config.ANTHROPIC_MODEL,
       timeoutMs: config.JOB_TIMEOUT_MS,
       logger: log,
@@ -179,7 +178,6 @@ async function handleMrComment(
     const result = await runClaude({
       worktreeDir: wt.dir,
       prompt: buildMrCommentPrompt(mr),
-      maxTurns: config.MAX_TURNS,
       model: config.ANTHROPIC_MODEL,
       timeoutMs: config.JOB_TIMEOUT_MS,
       logger: log,

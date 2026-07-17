@@ -133,10 +133,15 @@ for await (const msg of query({
   prompt,
   options: {
     cwd: worktreeDir,
-    permissionMode: "acceptEdits",     // no interactive prompts
-    allowedTools: ["Bash", "Read", "Edit", "Write", "Grep", "Glob"],
-    maxTurns: 40,                       // cost/time guard
-    // model defaults to latest; override via env if needed
+    // Claude Code's real system prompt — this is what makes it Claude Code, not a
+    // bare model with tools.
+    systemPrompt: { type: "preset", preset: "claude_code" },
+    settingSources: ["project"],        // load repo CLAUDE.md / .claude config
+    permissionMode: "bypassPermissions",// fully autonomous (safe: isolated container)
+    allowDangerouslySkipPermissions: true,
+    // No allowedTools cap → the full default toolset (incl. TodoWrite, Task, WebFetch…).
+    // No maxTurns → runs until the task is actually done.
+    // model: from ANTHROPIC_MODEL if set, else the SDK default.
   },
 })) {
   // stream to logs; capture final result + token usage
@@ -147,8 +152,9 @@ Notes:
 
 - **`cwd` = the isolated worktree** so Claude only sees that repo.
 - `CLAUDE.md` at repo root carries coding standards — Claude reads it automatically.
-- Guard rails: `maxTurns`, an overall wall-clock timeout, and `allowedTools` scoped to
-  what's needed (no network tools by default).
+- **No turn cap.** The agent runs to completion; the only guard is the wall-clock
+  `JOB_TIMEOUT_MS` (default 30 min, set `0` to disable). Isolation (container + worktree)
+  is what bounds blast radius, not a turn/permission limit.
 
 ---
 

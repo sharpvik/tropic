@@ -49,7 +49,6 @@ export interface RunClaudeOptions {
   worktreeDir: string;
   /** The fully-built prompt to run. */
   prompt: string;
-  maxTurns: number;
   model?: string;
   timeoutMs: number;
   logger: Logger;
@@ -66,7 +65,9 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
 
   const prompt = opts.prompt;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  // Wall-clock safety net. JOB_TIMEOUT_MS=0 disables it entirely (run unbounded).
+  const timer =
+    opts.timeoutMs > 0 ? setTimeout(() => controller.abort(), opts.timeoutMs) : undefined;
 
   let summary = "";
   let turns = 0;
@@ -89,7 +90,7 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
         allowDangerouslySkipPermissions: true,
         // No allowedTools restriction → the full default toolset (Bash, Edit, Write,
         // Read, Grep, Glob, TodoWrite, Task/subagents, WebFetch, WebSearch, Skills…).
-        maxTurns: opts.maxTurns,
+        // No maxTurns → the agent runs until the task is actually done.
         ...(opts.model ? { model: opts.model } : {}),
         abortController: controller,
       } as Record<string, unknown>,
@@ -111,7 +112,7 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
     ok = false;
     summary = summary || (err instanceof Error ? err.message : String(err));
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 
   return { summary, ok, usage, turns };

@@ -8,19 +8,72 @@ See [`DESIGN.md`](./DESIGN.md) for the full design.
 
 ## Quick start (fresh Ubuntu VM)
 
-One command:
+Native (systemd) install, one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/your-org/gitlab-claude-agent/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh \
+  | sudo bash -s -- --repo https://github.com/sharpvik/tropic.git
 ```
 
-The installer sets up Node, a dedicated user, the systemd service, and your config, then
+`bash -s --` passes the flags through to the piped script. The installer sets up Node, a
+dedicated `claude-agent` user, the systemd service, and your config (prompting for the
+GitLab URL, bot token, and Anthropic key, and auto-generating the webhook secret), then
 **prints the GitLab-side checklist and waits for you to press ENTER** before running a
-connectivity self-test. See `DESIGN.md` §14 for details and flags:
+connectivity self-test.
 
+Flags (see `DESIGN.md` §14):
+
+- `--repo <git-url>` — source repo to clone (defaults to a placeholder; set this)
+- `--ref <git-ref>` — branch/tag to install (default `main`)
+- `--domain example.com` — provision a Caddy TLS reverse proxy + real cert
 - `--docker` — run as a container instead of a native systemd service
-- `--domain example.com` — provision a Caddy TLS reverse proxy
 - `--uninstall [--purge]` — remove the service
+
+### Get HTTPS for the webhook
+
+Without `--domain`, the service listens on plain `:8080` and the checklist prints an
+`http://<vm-ip>:8080/webhook` URL — usable, but you must **uncheck "SSL verification"** on
+the GitLab webhook. To get HTTPS with an automatic Let's Encrypt cert, point a DNS record at
+the VM first, then:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh \
+  | sudo bash -s -- --repo https://github.com/sharpvik/tropic.git --domain agent.example.com
+```
+
+### If the repo is private
+
+Both the `curl` of `install.sh` and the `git clone` inside it need auth. Either make the
+repo public, embed a token in the clone URL (`--repo https://<token>@github.com/sharpvik/tropic.git`),
+or copy the files to the VM and run the script from a local path:
+
+```bash
+scp -r ./tropic user@vm:/tmp/tropic
+ssh user@vm 'sudo REPO_URL=/tmp/tropic bash /tmp/tropic/install.sh'
+```
+
+### Manage the service
+
+```bash
+journalctl -u gitlab-claude-agent -f    # logs
+systemctl restart gitlab-claude-agent   # restart
+```
+
+## VM sizing
+
+The service itself is tiny (~200–400 MB RAM, near-zero idle CPU). The real load is
+per-job: Claude runs the target repo's installs, builds, and **test suite** inside a
+worktree — i.e. CI-runner load, `MAX_CONCURRENCY` of them at once.
+
+| Config | vCPU | RAM | Disk |
+|---|---|---|---|
+| Light (concurrency 1–2, small repos) | 2 | 4 GB | 20 GB |
+| **Recommended default (concurrency 2)** | **4** | **8 GB** | **40 GB** |
+| Heavy (concurrency 4, or big monorepos) | 8 | 16 GB | 80–160 GB |
+
+Rule of thumb: `RAM ≈ 1 GB + MAX_CONCURRENCY × (peak RAM of one build+test run)`. Prefer
+more RAM over vCPU (OOM mid-build fails jobs; CPU starvation just slows them), add ~2 GB
+swap, and note that a stuck job holds its slot for the full `JOB_TIMEOUT_MS` (default 30 min).
 
 ## Run with Docker
 

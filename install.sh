@@ -114,6 +114,9 @@ ensure_user() {
 
 fetch_app() {
   info "Fetching application into ${APP_DIR}…"
+  # The app dir is owned by claude-agent but git runs here as root; whitelist it
+  # so git doesn't refuse with "dubious ownership" on re-runs.
+  git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
   if [ -d "${APP_DIR}/.git" ]; then
     git -C "$APP_DIR" fetch --depth 1 origin "$REPO_REF"
     git -C "$APP_DIR" checkout -f "$REPO_REF"

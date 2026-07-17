@@ -80,6 +80,18 @@ journalctl -u gitlab-claude-agent -f    # logs
 systemctl restart gitlab-claude-agent   # restart
 ```
 
+### Update to the latest version
+
+```bash
+sudo bash /opt/gitlab-claude-agent/update.sh
+# or from anywhere:
+curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/update.sh | sudo bash
+```
+
+`update.sh` pulls the latest code, rebuilds, redeploys the systemd unit (or rebuilds the
+Docker image), restarts the service, and health-checks it. It auto-detects native vs.
+Docker deployments and leaves your `.env` untouched.
+
 ## VM sizing
 
 The service itself is tiny (~200–400 MB RAM, near-zero idle CPU). The real load is

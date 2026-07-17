@@ -103,6 +103,7 @@ gitlab-claude-agent/
 ├─ data/queue.json        # persisted queue state (gitignored)
 ├─ .env.example
 ├─ install.sh             # one-command installer (curl | bash) — see §14
+├─ update.sh              # pull + rebuild + redeploy + restart
 ├─ Dockerfile             # container image — see §15
 ├─ docker-compose.yml     # one-command run with a persisted volume
 ├─ systemd/gitlab-claude-agent.service

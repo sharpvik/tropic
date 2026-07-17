@@ -1,10 +1,10 @@
 services:
   agent:
     build: .
-    image: gitlab-claude-agent:latest
+    image: tropic:latest
     restart: unless-stopped
     env_file:
-      - gitlab-claude-agent.env
+      - tropic.env
     # Not published publicly — Caddy reverse-proxies to it over the compose network.
     # Bound to localhost only so the host can run health checks.
     ports:
@@ -19,7 +19,7 @@ services:
     depends_on:
       - agent
     # SITE_ADDRESS = your domain (auto-HTTPS via Let's Encrypt) or ":80" (plain HTTP).
-    # Comes from gitlab-claude-agent.env; defaults to :80 if unset.
+    # Comes from tropic.env; defaults to :80 if unset.
     environment:
       - SITE_ADDRESS=${SITE_ADDRESS:-:80}
     ports:

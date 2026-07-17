@@ -1,4 +1,4 @@
-# GitLab → Claude Agent Service — Design
+# Tropic — GitLab → Claude Agent Service — Design
 
 A long-running service on a dedicated VM that listens to GitLab webhooks and, when an
 issue is **assigned to the "Claude" bot user**, runs Claude (via the Claude Agent SDK)
@@ -87,7 +87,7 @@ queued or running, drop the duplicate. (Guards against webhook retries / rapid r
 ## 4. Components & files
 
 ```
-gitlab-claude-agent/
+tropic/
 ├─ src/
 │  ├─ index.ts            # boot: config, start server + worker loop
 │  ├─ config.ts           # env parsing & validation (zod)
@@ -216,7 +216,7 @@ WORKSPACES_DIR=./workspaces
   (`docker compose`): an `agent` container plus a `caddy` container for TLS. There is no
   native/systemd path.
 - **Process supervision:** Docker (`restart: unless-stopped`). The agent reads its config
-  from `gitlab-claude-agent.env` (compose `env_file`).
+  from `tropic.env` (compose `env_file`).
 - **Privileges:** the agent runs as **root inside its container** so Claude's Bash tool can
   install packages and build/test with a writable `HOME` and `/tmp`. The container — not
   dropped privileges — is the isolation boundary; the host is untouched.
@@ -306,8 +306,8 @@ Runs as root; fails fast (`set -euo pipefail`) with a clear message on any error
 3. **Clean up legacy** — remove any old native systemd unit / host Caddy that would fight the
    containers for ports 80/443/8080.
 4. **Fetch the app** — clone the repo (pinned `--ref`, default `main`) into
-   `/opt/gitlab-claude-agent`.
-5. **Interactive config** — if `/etc/gitlab-claude-agent.env` doesn't exist, prompt and write
+   `/opt/tropic`.
+5. **Interactive config** — if `/etc/tropic.env` doesn't exist, prompt and write
    it `chmod 600`:
    - `GITLAB_BASE_URL`
    - **Bot identity — a regular bot user by default (works on all tiers).** Prompts for a
@@ -357,14 +357,14 @@ prints the remaining manual steps:
 ### 14.4 Uninstall
 
 `install.sh --uninstall` stops + removes the containers but **keeps** the repo
-(`/opt/gitlab-claude-agent`), config (`/etc/gitlab-claude-agent.env`), and Docker volumes —
-so a reinstall is just `sudo bash /opt/gitlab-claude-agent/install.sh`, no re-clone or
+(`/opt/tropic`), config (`/etc/tropic.env`), and Docker volumes —
+so a reinstall is just `sudo bash /opt/tropic/install.sh`, no re-clone or
 re-provisioning.
 
 `--purge` (with `--uninstall`) is the full wipe: repo, config, and Docker volumes. It
 re-execs from `/tmp` first so it can safely delete the app dir containing the script.
 
-Updating is `git pull` + `docker compose up -d --build` in `/opt/gitlab-claude-agent`.
+Updating is `git pull` + `docker compose up -d --build` in `/opt/tropic`.
 
 ---
 

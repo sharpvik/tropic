@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gitlab-claude-agent — one-command Docker installer for a fresh Ubuntu VM.
+# tropic — one-command Docker installer for a fresh Ubuntu VM.
 #
 #   curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh | sudo bash
 #
@@ -28,7 +28,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_NAME="gitlab-claude-agent"
+APP_NAME="tropic"
 APP_DIR="/opt/${APP_NAME}"
 ENV_FILE="/etc/${APP_NAME}.env"
 REPO_URL="${REPO_URL:-https://github.com/sharpvik/tropic.git}"
@@ -233,7 +233,7 @@ provision_admin_user() {
 
   info "Creating an api-scoped token for the bot user…"
   gl_api POST "/users/${uid}/personal_access_tokens" "$ADMIN_TOKEN" \
-    --data-urlencode "name=gitlab-claude-agent" --data-urlencode "scopes[]=api"
+    --data-urlencode "name=tropic" --data-urlencode "scopes[]=api"
   GITLAB_BOT_TOKEN="$(echo "$GL_BODY" | jq -r '.token // empty' 2>/dev/null)"
   [ -n "$GITLAB_BOT_TOKEN" ] || die "Bot user created but token generation failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
   info "Bot token created."

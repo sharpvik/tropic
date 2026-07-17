@@ -1,4 +1,4 @@
-# gitlab-claude-agent
+# tropic
 
 A long-running service that watches GitLab for issues **assigned to a Claude bot user**,
 runs Claude (via the Claude Agent SDK) against a checkout of the repo, and opens a merge
@@ -51,10 +51,10 @@ Flags (see `DESIGN.md` §14):
 
 ### Get HTTPS for the webhook
 
-Without `--domain`, the service listens on plain `:8080` and the checklist prints an
-`http://<vm-ip>:8080/webhook` URL — usable, but you must **uncheck "SSL verification"** on
-the GitLab webhook. To get HTTPS with an automatic Let's Encrypt cert, point a DNS record at
-the VM first, then:
+Without `--domain`, Caddy serves plain HTTP on `:80` and the checklist prints an
+`http://<vm-ip>/webhook` URL — usable, but you must **uncheck "SSL verification"** on the
+GitLab webhook. To get HTTPS with an automatic Let's Encrypt cert, point a DNS record at the
+VM first, then:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh \
@@ -75,7 +75,7 @@ ssh user@vm 'sudo REPO_URL=/tmp/tropic bash /tmp/tropic/install.sh'
 ### Manage the deployment
 
 ```bash
-cd /opt/gitlab-claude-agent
+cd /opt/tropic
 docker compose logs -f       # logs
 docker compose restart       # restart
 docker compose ps            # status
@@ -84,9 +84,9 @@ docker compose ps            # status
 ### Update to the latest version
 
 ```bash
-cd /opt/gitlab-claude-agent
+cd /opt/tropic
 sudo git pull
-sudo docker compose --env-file /etc/gitlab-claude-agent.env up -d --build
+sudo docker compose --env-file /etc/tropic.env up -d --build
 ```
 
 Pulls the latest code and rebuilds/restarts the containers. Your `.env` is untouched.
@@ -110,7 +110,7 @@ swap, and note that a stuck job holds its slot for the full `JOB_TIMEOUT_MS` (de
 ## Run with Docker
 
 ```bash
-cp .env.example gitlab-claude-agent.env   # fill it in
+cp .env.example tropic.env   # fill it in
 docker compose up -d --build
 ```
 

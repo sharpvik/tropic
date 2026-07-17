@@ -1,5 +1,5 @@
 {
-  "name": "gitlab-claude-agent",
+  "name": "tropic",
   "version": "0.1.0",
   "description": "A long-running service that runs Claude against GitLab issues assigned to a bot user and opens merge requests.",
   "license": "MIT",

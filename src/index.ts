@@ -36,7 +36,7 @@ async function main(): Promise<void> {
 
   const app = createServer({ config, queue, logger });
   const server = app.listen(config.PORT, () => {
-    logger.info({ port: config.PORT }, "gitlab-claude-agent listening");
+    logger.info({ port: config.PORT }, "tropic listening");
   });
 
   const shutdown = (signal: string) => {

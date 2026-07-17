@@ -14,6 +14,8 @@ const ConfigSchema = z.object({
 
   ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
   ANTHROPIC_MODEL: z.string().min(1).optional(),
+  // Reasoning effort the agent applies. Defaults to "low".
+  ANTHROPIC_EFFORT: z.enum(["low", "medium", "high", "xhigh", "max"]).default("low"),
 
   MAX_CONCURRENCY: z.coerce.number().int().positive().default(2),
   // Wall-clock cap per job in ms; generous by default (4h). 0 disables it entirely.

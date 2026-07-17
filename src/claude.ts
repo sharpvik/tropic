@@ -45,11 +45,15 @@ export function buildMrCommentPrompt(job: MrCommentJobPayload): string {
   ].join("\n");
 }
 
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface RunClaudeOptions {
   worktreeDir: string;
   /** The fully-built prompt to run. */
   prompt: string;
   model?: string;
+  /** Reasoning effort level. */
+  effort: EffortLevel;
   timeoutMs: number;
   logger: Logger;
 }
@@ -91,6 +95,7 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
         // No allowedTools restriction → the full default toolset (Bash, Edit, Write,
         // Read, Grep, Glob, TodoWrite, Task/subagents, WebFetch, WebSearch, Skills…).
         // No maxTurns → the agent runs until the task is actually done.
+        effort: opts.effort,
         ...(opts.model ? { model: opts.model } : {}),
         abortController: controller,
       } as Record<string, unknown>,

@@ -101,6 +101,7 @@ async function handleIssue(
       worktreeDir: wt.dir,
       prompt: buildPrompt(issue),
       model: config.ANTHROPIC_MODEL,
+      effort: config.ANTHROPIC_EFFORT,
       timeoutMs: config.JOB_TIMEOUT_MS,
       logger: log,
     });
@@ -179,6 +180,7 @@ async function handleMrComment(
       worktreeDir: wt.dir,
       prompt: buildMrCommentPrompt(mr),
       model: config.ANTHROPIC_MODEL,
+      effort: config.ANTHROPIC_EFFORT,
       timeoutMs: config.JOB_TIMEOUT_MS,
       logger: log,
     });

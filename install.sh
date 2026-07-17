@@ -404,7 +404,9 @@ install_service() {
   info "Installing systemd unit…"
   install -m 0644 "${APP_DIR}/systemd/${APP_NAME}.service" "$SERVICE_FILE"
   systemctl daemon-reload
-  systemctl enable --now "$APP_NAME"
+  systemctl enable "$APP_NAME" >/dev/null 2>&1 || true
+  # restart (not just enable --now) so a re-install picks up the freshly built dist/.
+  systemctl restart "$APP_NAME"
   sleep 2
   if ! systemctl is-active --quiet "$APP_NAME"; then
     err "Service failed to start. Last log lines:"

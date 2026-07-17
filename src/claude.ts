@@ -1,5 +1,5 @@
 import type { Logger } from "./log";
-import type { IssueJobPayload } from "./webhook";
+import type { IssueJobPayload, MrCommentJobPayload } from "./webhook";
 
 export interface ClaudeResult {
   /** Final assistant text / result summary, if any. */
@@ -26,9 +26,29 @@ export function buildPrompt(issue: IssueJobPayload): string {
   ].join("\n");
 }
 
+/** Build the prompt for iterating on an open MR in response to a reviewer comment. */
+export function buildMrCommentPrompt(job: MrCommentJobPayload): string {
+  // The bot's own username in the mention is noise; leave the rest of the comment intact.
+  return [
+    `You are iterating on an open GitLab merge request in this repository.`,
+    `The MR's branch is already checked out.`,
+    ``,
+    `# MR !${job.mrIid}: ${job.title}`,
+    ``,
+    `A reviewer left this comment mentioning you:`,
+    ``,
+    job.comment.trim() || "(empty comment)",
+    ``,
+    `Address the comment by editing this repository. Follow CLAUDE.md if present.`,
+    `Run the project's tests before finishing. Do not touch unrelated files.`,
+    `When done, summarise what you changed and why.`,
+  ].join("\n");
+}
+
 export interface RunClaudeOptions {
   worktreeDir: string;
-  issue: IssueJobPayload;
+  /** The fully-built prompt to run. */
+  prompt: string;
   maxTurns: number;
   model?: string;
   timeoutMs: number;
@@ -44,7 +64,7 @@ export interface RunClaudeOptions {
 export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
   const { query } = (await import("@anthropic-ai/claude-agent-sdk")) as typeof import("@anthropic-ai/claude-agent-sdk");
 
-  const prompt = buildPrompt(opts.issue);
+  const prompt = opts.prompt;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
 

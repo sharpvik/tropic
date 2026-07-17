@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAssignmentHook } from "../src/webhook";
+import { parseAssignmentHook, parseNoteHook, mentionsUser } from "../src/webhook";
 
 const BOT = "claude-bot";
 
@@ -29,7 +29,7 @@ describe("parseAssignmentHook", () => {
       title: "Fix the bug",
       description: "details",
       projectPath: "group/repo",
-      dedupeKey: "7:42:assigned",
+      dedupeKey: "7:issue:42:assigned",
     });
   });
 
@@ -72,7 +72,7 @@ describe("parseAssignmentHook", () => {
       BOT,
     );
     expect(job).not.toBeNull();
-    expect(job).toMatchObject({ issueIid: 42, dedupeKey: "7:42:assigned" });
+    expect(job).toMatchObject({ issueIid: 42, dedupeKey: "7:issue:42:assigned" });
   });
 
   it("does not fire when an issue is created assigned to someone else", () => {
@@ -116,5 +116,74 @@ describe("parseAssignmentHook", () => {
     );
     expect(job?.title).toBe("Issue #9");
     expect(job?.description).toBe("");
+  });
+});
+
+const BOT_U = "claude-bot";
+
+function noteHook(overrides: Record<string, unknown> = {}) {
+  return {
+    object_kind: "note",
+    user: { username: "reviewer" },
+    project: { id: 7, path_with_namespace: "group/repo" },
+    object_attributes: {
+      id: 555,
+      note: "hey @claude-bot please fix the typo",
+      noteable_type: "MergeRequest",
+    },
+    merge_request: { iid: 12, source_branch: "claude/issue-42-fix", title: "Fix the bug" },
+    ...overrides,
+  };
+}
+
+describe("mentionsUser", () => {
+  it("matches an exact @mention", () => {
+    expect(mentionsUser("please @claude-bot help", "claude-bot")).toBe(true);
+    expect(mentionsUser("@claude-bot", "claude-bot")).toBe(true);
+  });
+  it("does not match a longer username or missing @", () => {
+    expect(mentionsUser("@claude-bottom", "claude-bot")).toBe(false);
+    expect(mentionsUser("claude-bot", "claude-bot")).toBe(false);
+    expect(mentionsUser("email claude-bot@x.com", "claude-bot")).toBe(false);
+  });
+});
+
+describe("parseNoteHook", () => {
+  it("fires on an MR comment that mentions the bot", () => {
+    const job = parseNoteHook(noteHook(), BOT_U);
+    expect(job).toMatchObject({
+      kind: "mr_comment",
+      projectId: 7,
+      projectPath: "group/repo",
+      mrIid: 12,
+      sourceBranch: "claude/issue-42-fix",
+      dedupeKey: "7:mr:12:note:555",
+    });
+    expect(job?.comment).toContain("fix the typo");
+  });
+
+  it("ignores comments that don't mention the bot", () => {
+    expect(parseNoteHook(noteHook({ object_attributes: { id: 1, note: "lgtm", noteable_type: "MergeRequest" } }), BOT_U)).toBeNull();
+  });
+
+  it("ignores the bot's own comments (no feedback loop)", () => {
+    expect(parseNoteHook(noteHook({ user: { username: BOT_U } }), BOT_U)).toBeNull();
+  });
+
+  it("ignores non-MR notes (e.g. issue comments)", () => {
+    expect(
+      parseNoteHook(
+        noteHook({ object_attributes: { id: 2, note: "@claude-bot", noteable_type: "Issue" } }),
+        BOT_U,
+      ),
+    ).toBeNull();
+  });
+
+  it("ignores note hooks with no merge_request payload", () => {
+    expect(parseNoteHook(noteHook({ merge_request: undefined }), BOT_U)).toBeNull();
+  });
+
+  it("ignores non-note events", () => {
+    expect(parseNoteHook({ object_kind: "issue" }, BOT_U)).toBeNull();
   });
 });

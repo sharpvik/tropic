@@ -2,14 +2,14 @@ import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "./log";
-import type { IssueJobPayload } from "./webhook";
+import type { JobPayload } from "./webhook";
 
 export type JobStatus = "queued" | "running" | "done" | "failed";
 
 export interface Job {
   id: string;
   dedupeKey: string;
-  payload: IssueJobPayload;
+  payload: JobPayload;
   status: JobStatus;
   attempts: number;
   createdAt: number;
@@ -84,7 +84,7 @@ export class JobQueue {
   }
 
   /** Enqueue a job unless an active (queued/running) job with the same key exists. */
-  enqueue(payload: IssueJobPayload): EnqueueResult {
+  enqueue(payload: JobPayload): EnqueueResult {
     const existing = this.jobs.find(
       (j) =>
         j.dedupeKey === payload.dedupeKey &&

@@ -2,9 +2,10 @@ import type { Config } from "./config";
 import type { GitLabClient } from "./gitlab";
 import type { GitOps } from "./git";
 import { authedRepoUrl, branchName } from "./git";
-import type { ClaudeResult, RunClaudeOptions } from "./claude";
+import { buildPrompt, buildMrCommentPrompt, type ClaudeResult, type RunClaudeOptions } from "./claude";
 import { jobLogger, type Logger } from "./log";
 import type { Job } from "./queue";
+import type { IssueJobPayload, MrCommentJobPayload } from "./webhook";
 
 export interface WorkerDeps {
   config: Config;
@@ -14,17 +15,20 @@ export interface WorkerDeps {
   logger: Logger;
 }
 
-/** MR / final comment body describing what Claude did. */
-export function buildResultComment(mrUrl: string, result: ClaudeResult): string {
-  const usage = result.usage
+function usageSuffix(result: ClaudeResult): string {
+  return result.usage
     ? ` (${result.usage.inputTokens ?? "?"} in / ${result.usage.outputTokens ?? "?"} out tokens)`
     : "";
+}
+
+/** Issue result comment (links the opened MR). */
+export function buildResultComment(mrUrl: string, result: ClaudeResult): string {
   return [
     `✅ Opened a merge request: ${mrUrl}`,
     ``,
     result.summary.trim() || "_Claude did not provide a summary._",
     ``,
-    `_Automated by the Claude agent${usage}._`,
+    `_Automated by the Claude agent${usageSuffix(result)}._`,
   ].join("\n");
 }
 
@@ -40,90 +44,166 @@ export function buildMrDescription(issueIid: number, result: ClaudeResult): stri
   ].join("\n");
 }
 
+/** Reply posted on the MR after iterating on a comment. */
+export function buildMrReplyComment(result: ClaudeResult, pushed: boolean): string {
+  const head = pushed
+    ? "✅ Pushed changes to this MR's branch."
+    : "🤔 I looked into it but didn't make any changes.";
+  return [
+    head,
+    ``,
+    result.summary.trim() || "_Claude did not provide a summary._",
+    ``,
+    `_Automated by the Claude agent${usageSuffix(result)}._`,
+  ].join("\n");
+}
+
 /** Create the per-job handler used by the queue. */
 export function createWorker(deps: WorkerDeps) {
-  const { config, gitlab, git, runClaude } = deps;
-
   return async function handle(job: Job): Promise<void> {
-    const issue = job.payload;
     const log = jobLogger(deps.logger, job.id);
-    log.info({ issue: issue.issueIid, project: issue.projectPath }, "job started");
+    if (job.payload.kind === "mr_comment") {
+      return handleMrComment(deps, job, job.payload, log);
+    }
+    return handleIssue(deps, job, job.payload, log);
+  };
+}
 
-    // a. acknowledge
-    await gitlab
-      .commentOnIssue(issue.projectId, issue.issueIid, "👋 On it — I'll open an MR shortly.")
-      .catch((err) => log.warn({ err }, "could not post ack comment"));
+async function handleIssue(
+  deps: WorkerDeps,
+  job: Job,
+  issue: IssueJobPayload,
+  log: Logger,
+): Promise<void> {
+  const { config, gitlab, git, runClaude } = deps;
+  log.info({ issue: issue.issueIid, project: issue.projectPath }, "issue job started");
 
-    const repoUrl = authedRepoUrl(
-      config.GITLAB_BASE_URL,
-      issue.projectPath,
-      config.BOT_GIT_USERNAME,
-      config.GITLAB_BOT_TOKEN,
-    );
+  await gitlab
+    .commentOnIssue(issue.projectId, issue.issueIid, "👋 On it — I'll open an MR shortly.")
+    .catch((err) => log.warn({ err }, "could not post ack comment"));
 
-    const branch = branchName(issue.issueIid, issue.title);
-    let cleanup: (() => Promise<void>) | undefined;
+  const repoUrl = authedRepoUrl(
+    config.GITLAB_BASE_URL,
+    issue.projectPath,
+    config.BOT_GIT_USERNAME,
+    config.GITLAB_BOT_TOKEN,
+  );
+  const branch = branchName(issue.issueIid, issue.title);
+  let cleanup: (() => Promise<void>) | undefined;
 
-    try {
-      // b. prepare mirror + worktree
-      await git.ensureMirror(repoUrl, issue.projectPath);
-      const defaultBranch = await gitlab.defaultBranch(issue.projectId);
-      const wt = await git.createWorktree(issue.projectPath, defaultBranch, branch);
-      cleanup = wt.cleanup;
+  try {
+    await git.ensureMirror(repoUrl, issue.projectPath);
+    const defaultBranch = await gitlab.defaultBranch(issue.projectId);
+    const wt = await git.createWorktree(issue.projectPath, defaultBranch, branch);
+    cleanup = wt.cleanup;
 
-      // d. run Claude
-      const result = await runClaude({
-        worktreeDir: wt.dir,
-        issue,
-        maxTurns: config.MAX_TURNS,
-        model: config.ANTHROPIC_MODEL,
-        timeoutMs: config.JOB_TIMEOUT_MS,
-        logger: log,
-      });
+    const result = await runClaude({
+      worktreeDir: wt.dir,
+      prompt: buildPrompt(issue),
+      maxTurns: config.MAX_TURNS,
+      model: config.ANTHROPIC_MODEL,
+      timeoutMs: config.JOB_TIMEOUT_MS,
+      logger: log,
+    });
 
-      // e. commit + push if there are changes
-      if (!(await git.hasChanges(wt.dir))) {
-        log.info("no changes produced");
-        await gitlab.commentOnIssue(
-          issue.projectId,
-          issue.issueIid,
-          result.ok
-            ? "🤔 I finished but produced no changes. The issue may need clarification."
-            : `⚠️ The run did not complete cleanly and produced no changes.\n\n${result.summary.slice(0, 800)}`,
-        );
-        return;
-      }
-
-      await git.commitAll(wt.dir, `${issue.title}\n\nCloses #${issue.issueIid}`);
-      await git.push(wt.dir, branch);
-
-      // f. open MR
-      const mr = await gitlab.createMergeRequest(issue.projectId, {
-        sourceBranch: branch,
-        targetBranch: defaultBranch,
-        title: `Draft: ${issue.title}`,
-        description: buildMrDescription(issue.issueIid, result),
-      });
-
-      // g. result comment
+    if (!(await git.hasChanges(wt.dir))) {
+      log.info("no changes produced");
       await gitlab.commentOnIssue(
         issue.projectId,
         issue.issueIid,
-        buildResultComment(mr.web_url, result),
+        result.ok
+          ? "🤔 I finished but produced no changes. The issue may need clarification."
+          : `⚠️ The run did not complete cleanly and produced no changes.\n\n${result.summary.slice(0, 800)}`,
       );
-      log.info({ mr: mr.web_url }, "job completed");
-    } catch (err) {
-      log.error({ err }, "job failed");
-      await gitlab
-        .commentOnIssue(
-          issue.projectId,
-          issue.issueIid,
-          `❌ Something went wrong while working on this issue. Check the service logs (job \`${job.id}\`).`,
-        )
-        .catch(() => undefined);
-      throw err;
-    } finally {
-      if (cleanup) await cleanup().catch((err) => log.warn({ err }, "worktree cleanup failed"));
+      return;
     }
-  };
+
+    await git.commitAll(wt.dir, `${issue.title}\n\nCloses #${issue.issueIid}`);
+    await git.push(wt.dir, branch);
+
+    const mr = await gitlab.createMergeRequest(issue.projectId, {
+      sourceBranch: branch,
+      targetBranch: defaultBranch,
+      title: `Draft: ${issue.title}`,
+      description: buildMrDescription(issue.issueIid, result),
+    });
+
+    await gitlab.commentOnIssue(
+      issue.projectId,
+      issue.issueIid,
+      buildResultComment(mr.web_url, result),
+    );
+    log.info({ mr: mr.web_url }, "issue job completed");
+  } catch (err) {
+    log.error({ err }, "issue job failed");
+    await gitlab
+      .commentOnIssue(
+        issue.projectId,
+        issue.issueIid,
+        `❌ Something went wrong while working on this issue. Check the service logs (job \`${job.id}\`).`,
+      )
+      .catch(() => undefined);
+    throw err;
+  } finally {
+    if (cleanup) await cleanup().catch((err) => log.warn({ err }, "worktree cleanup failed"));
+  }
+}
+
+async function handleMrComment(
+  deps: WorkerDeps,
+  job: Job,
+  mr: MrCommentJobPayload,
+  log: Logger,
+): Promise<void> {
+  const { config, gitlab, git, runClaude } = deps;
+  log.info({ mr: mr.mrIid, project: mr.projectPath, branch: mr.sourceBranch }, "mr comment job started");
+
+  await gitlab
+    .commentOnMergeRequest(mr.projectId, mr.mrIid, "👋 On it — I'll push an update shortly.")
+    .catch((err) => log.warn({ err }, "could not post ack comment"));
+
+  const repoUrl = authedRepoUrl(
+    config.GITLAB_BASE_URL,
+    mr.projectPath,
+    config.BOT_GIT_USERNAME,
+    config.GITLAB_BOT_TOKEN,
+  );
+  let cleanup: (() => Promise<void>) | undefined;
+
+  try {
+    await git.ensureMirror(repoUrl, mr.projectPath);
+    // Check out the MR's own branch so commits land on it.
+    const wt = await git.createWorktreeFromExisting(mr.projectPath, mr.sourceBranch);
+    cleanup = wt.cleanup;
+
+    const result = await runClaude({
+      worktreeDir: wt.dir,
+      prompt: buildMrCommentPrompt(mr),
+      maxTurns: config.MAX_TURNS,
+      model: config.ANTHROPIC_MODEL,
+      timeoutMs: config.JOB_TIMEOUT_MS,
+      logger: log,
+    });
+
+    const pushed = await git.hasChanges(wt.dir);
+    if (pushed) {
+      await git.commitAll(wt.dir, `Address review comment on !${mr.mrIid}`);
+      await git.push(wt.dir, mr.sourceBranch);
+    }
+
+    await gitlab.commentOnMergeRequest(mr.projectId, mr.mrIid, buildMrReplyComment(result, pushed));
+    log.info({ mr: mr.mrIid, pushed }, "mr comment job completed");
+  } catch (err) {
+    log.error({ err }, "mr comment job failed");
+    await gitlab
+      .commentOnMergeRequest(
+        mr.projectId,
+        mr.mrIid,
+        `❌ Something went wrong while addressing that comment. Check the service logs (job \`${job.id}\`).`,
+      )
+      .catch(() => undefined);
+    throw err;
+  } finally {
+    if (cleanup) await cleanup().catch((err) => log.warn({ err }, "worktree cleanup failed"));
+  }
 }

@@ -21,6 +21,9 @@ export interface GitLabApi {
   IssueNotes: {
     create(projectId: number, issueIid: number, body: string): Promise<unknown>;
   };
+  MergeRequestNotes: {
+    create(projectId: number, mergeRequestIid: number, body: string): Promise<unknown>;
+  };
   MergeRequests: {
     create(
       projectId: number,
@@ -70,6 +73,10 @@ export class GitLabClient {
 
   async commentOnIssue(projectId: number, issueIid: number, body: string): Promise<void> {
     await this.api.IssueNotes.create(projectId, issueIid, body);
+  }
+
+  async commentOnMergeRequest(projectId: number, mrIid: number, body: string): Promise<void> {
+    await this.api.MergeRequestNotes.create(projectId, mrIid, body);
   }
 
   async createMergeRequest(

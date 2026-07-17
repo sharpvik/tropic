@@ -140,6 +140,29 @@ export class GitOps {
     };
   }
 
+  /**
+   * Create a worktree that checks out an EXISTING branch (e.g. an MR's source
+   * branch) so commits land on that same branch. Caller must invoke `cleanup()`.
+   */
+  async createWorktreeFromExisting(
+    projectPath: string,
+    branch: string,
+  ): Promise<WorktreeHandle> {
+    const mirror = this.mirrorDir(projectPath);
+    const dir = join(
+      this.workspacesDir,
+      safeName(projectPath),
+      "wt",
+      branch.replace(/[^a-zA-Z0-9._-]+/g, "_"),
+    );
+    await this.removeWorktreeAt(mirror, dir).catch(() => undefined);
+    // No -b: check out the existing branch (present as refs/heads/<branch> in the mirror).
+    await this.git(["worktree", "add", dir, branch], mirror);
+    await this.git(["config", "user.name", this.botUsername], dir);
+    await this.git(["config", "user.email", this.botEmail], dir);
+    return { dir, branch, cleanup: () => this.removeWorktreeAt(mirror, dir) };
+  }
+
   private async removeWorktreeAt(mirror: string, dir: string): Promise<void> {
     await this.git(["worktree", "remove", "--force", dir], mirror).catch(() => undefined);
     await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);

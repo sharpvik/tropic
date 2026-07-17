@@ -424,14 +424,14 @@ setup_projects() {
     if [ -n "$existing" ]; then
       gl_api PUT "/projects/${enc}/hooks/${existing}" "$token" \
         --data-urlencode "url=${hook_url}" --data-urlencode "token=${GITLAB_WEBHOOK_SECRET}" \
-        --data-urlencode "issues_events=true" --data-urlencode "push_events=false" \
+        --data-urlencode "issues_events=true" --data-urlencode "note_events=true" --data-urlencode "push_events=false" \
         --data-urlencode "enable_ssl_verification=${ssl}"
       if [ "$GL_CODE" = "200" ]; then info "  [${p}] webhook updated (id ${existing}) — secret synced."; hook_ok=1
       else warn "  [${p}] webhook exists (id ${existing}) but update failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."; fi
     else
       gl_api POST "/projects/${enc}/hooks" "$token" \
         --data-urlencode "url=${hook_url}" --data-urlencode "token=${GITLAB_WEBHOOK_SECRET}" \
-        --data-urlencode "issues_events=true" --data-urlencode "push_events=false" \
+        --data-urlencode "issues_events=true" --data-urlencode "note_events=true" --data-urlencode "push_events=false" \
         --data-urlencode "enable_ssl_verification=${ssl}"
       if [ "$GL_CODE" = "201" ]; then info "  [${p}] Issues webhook created → ${hook_url}"; hook_ok=1
       else warn "  [${p}] could not create webhook (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY")). Add it manually."; fi
@@ -483,7 +483,7 @@ EOF
  2. In each project (or group):  Settings → Webhooks → Add webhook
        URL:           ${url}/webhook
        Secret token:  ${secret}
-       Trigger:       [x] Issues events   (leave everything else unchecked)
+       Trigger:       [x] Issues events   [x] Comments   (leave the rest unchecked)
        SSL verify:    [x] if you used --domain (HTTPS); otherwise off
 
  3. (Optional) Add a CLAUDE.md to each repo with your coding standards.

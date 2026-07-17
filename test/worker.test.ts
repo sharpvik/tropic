@@ -4,7 +4,7 @@ import { buildPrompt } from "../src/claude";
 import type { ClaudeResult } from "../src/claude";
 import { parseConfig } from "../src/config";
 import type { Job } from "../src/queue";
-import type { IssueJobPayload } from "../src/webhook";
+import type { IssueJobPayload, MrCommentJobPayload } from "../src/webhook";
 import pino from "pino";
 
 const logger = pino({ level: "silent" });
@@ -17,12 +17,13 @@ const config = parseConfig({
 } as NodeJS.ProcessEnv);
 
 const payload: IssueJobPayload = {
+  kind: "issue",
   projectId: 7,
   issueIid: 42,
   title: "Fix the bug",
   description: "there is a bug",
   projectPath: "group/repo",
-  dedupeKey: "7:42:assigned",
+  dedupeKey: "7:issue:42:assigned",
 };
 
 const job: Job = {
@@ -35,9 +36,23 @@ const job: Job = {
   updatedAt: 0,
 };
 
+const mrPayload: MrCommentJobPayload = {
+  kind: "mr_comment",
+  projectId: 7,
+  projectPath: "group/repo",
+  mrIid: 12,
+  sourceBranch: "claude/issue-42-fix",
+  title: "Fix the bug",
+  comment: "@claude-bot please rename the variable",
+  dedupeKey: "7:mr:12:note:555",
+};
+
+const mrJob: Job = { ...job, id: "job-2", payload: mrPayload, dedupeKey: mrPayload.dedupeKey };
+
 function mocks(overrides: { hasChanges?: boolean; claudeOk?: boolean } = {}) {
   const gitlab = {
     commentOnIssue: vi.fn(async () => {}),
+    commentOnMergeRequest: vi.fn(async () => {}),
     defaultBranch: vi.fn(async () => "main"),
     createMergeRequest: vi.fn(async () => ({ iid: 3, web_url: "https://mr/3" })),
     currentUser: vi.fn(),
@@ -46,6 +61,7 @@ function mocks(overrides: { hasChanges?: boolean; claudeOk?: boolean } = {}) {
   const git = {
     ensureMirror: vi.fn(async () => "mirror"),
     createWorktree: vi.fn(async () => ({ dir: "/wt", branch: "claude/issue-42-fix-the-bug", cleanup })),
+    createWorktreeFromExisting: vi.fn(async () => ({ dir: "/wt", branch: "claude/issue-42-fix", cleanup })),
     hasChanges: vi.fn(async () => overrides.hasChanges ?? true),
     commitAll: vi.fn(async () => {}),
     push: vi.fn(async () => {}),
@@ -125,6 +141,35 @@ describe("worker pipeline", () => {
 
     await expect(handle(job)).rejects.toThrow("push failed");
     expect(m.gitlab.commentOnIssue).toHaveBeenCalledWith(7, 42, expect.stringContaining("went wrong"));
+    expect(m.cleanup).toHaveBeenCalled();
+  });
+});
+
+describe("worker MR-comment pipeline", () => {
+  it("checks out the MR branch, runs claude, commits, pushes, replies on the MR", async () => {
+    const m = mocks({ hasChanges: true });
+    const handle = createWorker({ config, logger, ...m });
+    await handle(mrJob);
+
+    expect(m.gitlab.commentOnMergeRequest).toHaveBeenCalledWith(7, 12, expect.stringContaining("On it"));
+    expect(m.git.createWorktreeFromExisting).toHaveBeenCalledWith("group/repo", "claude/issue-42-fix");
+    expect(m.git.createWorktree).not.toHaveBeenCalled();
+    expect(m.runClaude).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: expect.stringContaining("rename the variable") }),
+    );
+    expect(m.git.push).toHaveBeenCalledWith("/wt", "claude/issue-42-fix");
+    expect(m.gitlab.createMergeRequest).not.toHaveBeenCalled();
+    expect(m.gitlab.commentOnMergeRequest).toHaveBeenCalledWith(7, 12, expect.stringContaining("Pushed changes"));
+    expect(m.cleanup).toHaveBeenCalled();
+  });
+
+  it("replies without pushing when the comment yields no changes", async () => {
+    const m = mocks({ hasChanges: false });
+    const handle = createWorker({ config, logger, ...m });
+    await handle(mrJob);
+
+    expect(m.git.push).not.toHaveBeenCalled();
+    expect(m.gitlab.commentOnMergeRequest).toHaveBeenCalledWith(7, 12, expect.stringContaining("didn't make any changes"));
     expect(m.cleanup).toHaveBeenCalled();
   });
 });

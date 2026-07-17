@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import express, { type Express, type Request, type Response } from "express";
 import type { Config } from "./config";
 import { isProjectAllowed } from "./config";
-import { parseAssignmentHook } from "./webhook";
+import { parseAssignmentHook, parseNoteHook } from "./webhook";
 import type { JobQueue } from "./queue";
 import type { Logger } from "./log";
 
@@ -38,7 +38,10 @@ export function createServer(deps: ServerDeps): Express {
       return;
     }
 
-    const job = parseAssignmentHook(req.body, config.CLAUDE_BOT_USERNAME);
+    // Either an issue assigned to the bot, or an MR comment @-mentioning the bot.
+    const job =
+      parseAssignmentHook(req.body, config.CLAUDE_BOT_USERNAME) ??
+      parseNoteHook(req.body, config.CLAUDE_BOT_USERNAME);
     if (!job) {
       // Valid request, just not an event we act on.
       res.status(200).json({ ignored: true });
@@ -59,7 +62,7 @@ export function createServer(deps: ServerDeps): Express {
     }
 
     logger.info(
-      { jobId: result.job?.id, issue: job.issueIid, project: job.projectPath },
+      { jobId: result.job?.id, kind: job.kind, project: job.projectPath },
       "job enqueued",
     );
     res.status(202).json({ accepted: true, jobId: result.job?.id, ahead: queue.pending() - 1 });

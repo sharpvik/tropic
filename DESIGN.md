@@ -171,7 +171,7 @@ Notes:
 |---|---|
 | Comment on issue | `POST /projects/:id/issues/:iid/notes` |
 | Open MR | `POST /projects/:id/merge_requests` |
-| Comment on MR (optional) | `POST /projects/:id/merge_requests/:iid/notes` |
+| Comment on MR (ack + reply on `@mention`) | `POST /projects/:id/merge_requests/:iid/notes` |
 
 API calls go through the official **`@gitbeaker/rest`** SDK (not a hand-rolled client).
 MR body links the issue and includes a short summary of what Claude did + token usage.
@@ -256,8 +256,9 @@ the alternative.
    Docker-per-job for isolation if you'll point this at many repos.)
 3. **Queue backend** — in-process + JSON file is fine to start; move to Redis/BullMQ if you
    want multi-VM or durable retries later.
-4. **Follow-ups** — do you also want `@claude` comment replies to iterate on an open MR, or
-   is first-pass issue → MR enough for v1? (Design leaves room; v1 can be assignment-only.)
+4. **Follow-ups** — ✅ **implemented.** `@claude-bot` in an MR comment (Note Hook) makes the
+   bot check out that MR's branch, act on the comment, push to the same branch, and reply.
+   The installer enables both **Issues** and **Comments** webhook triggers.
 5. **Model** — pin a specific Claude model, or track latest?
 
 ---

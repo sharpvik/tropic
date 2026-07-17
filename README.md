@@ -136,11 +136,19 @@ Required: `GITLAB_BASE_URL`, `GITLAB_WEBHOOK_SECRET`, `GITLAB_BOT_TOKEN`,
 
 ## How it works
 
-1. GitLab sends an **Issue Hook** to `POST /webhook` (secret verified in constant time).
-2. The handler filters for the *false→true* transition of the Claude bot being assigned,
-   dedupes, enqueues, and returns immediately.
-3. A bounded-concurrency worker prepares a git worktree, runs the Claude Agent SDK inside
-   it, commits + pushes any changes, opens an MR, and comments the result back on the issue.
+Two triggers, both delivered to `POST /webhook` (secret verified in constant time):
+
+1. **Issue assigned to the bot** — the handler fires on the *false→true* assignment
+   transition (or an issue created already assigned), then a worker prepares a git worktree
+   off the default branch, runs Claude, commits + pushes a new branch, opens an MR, and
+   comments the result on the issue.
+2. **`@claude-bot` mentioned in an MR comment** — the handler fires on an MR **Note Hook**
+   that @-mentions the bot (ignoring the bot's own comments), then a worker checks out the
+   MR's source branch, runs Claude against the comment, pushes the changes to that same
+   branch, and replies on the MR.
+
+Both paths dedupe (assignment by issue, comments by note id), run under bounded concurrency,
+and the webhook returns immediately.
 
 The GitLab API is accessed through the official [`@gitbeaker/rest`](https://github.com/jdalrymple/gitbeaker)
 SDK. The service never merges anything — CI, branch protection, and approvals still gate the

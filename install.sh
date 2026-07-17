@@ -45,11 +45,13 @@ GITLAB_GROUP_ID=""   # if set, create a group service account instead of instanc
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-c_reset=$'\e[0m'; c_bold=$'\e[1m'; c_green=$'\e[32m'; c_yellow=$'\e[33m'; c_red=$'\e[31m'
+c_reset=$'\e[0m'; c_bold=$'\e[1m'; c_green=$'\e[32m'; c_yellow=$'\e[33m'; c_red=$'\e[31m'; c_dim=$'\e[2m'; c_cyan=$'\e[36m'
 info()  { echo "${c_green}==>${c_reset} $*"; }
 warn()  { echo "${c_yellow}!!${c_reset} $*"; }
 err()   { echo "${c_red}xx${c_reset} $*" >&2; }
 die()   { err "$*"; exit 1; }
+# Dim indented guidance line, printed before a prompt.
+guide() { echo "   ${c_dim}$*${c_reset}"; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || die "Please run as root (use: sudo bash install.sh)"; }
 
@@ -162,7 +164,15 @@ provision_service_account() {
   local base="${GITLAB_BASE_URL%/}" admin sa_name sa_user sa_path sa_json sa_id tok_json
   echo
   info "Provisioning a GitLab service account (used once; the admin token is not stored)."
-  prompt_var GITLAB_ADMIN_TOKEN "GitLab ADMIN token (used once to create the service account)" "" secret
+  echo
+  guide "How to get an ADMIN token (you need an account with Administrator access):"
+  guide "  1. Open:  ${base}/-/user_settings/personal_access_tokens"
+  guide "     (or: top-right avatar → Edit profile → Access tokens)"
+  guide "  2. Name it e.g. 'bootstrap', set an expiry (tomorrow is fine — it's one-time)."
+  guide "  3. Tick the  ${c_bold}api${c_reset}${c_dim}  scope, click 'Create personal access token'."
+  guide "  4. Copy the token shown (starts with 'glpat-') and paste it below."
+  guide "Not an admin? Press Ctrl-C and re-run with  --group <id>  or  --bot-token."
+  prompt_var GITLAB_ADMIN_TOKEN "GitLab ADMIN token (glpat-…, used once, not stored)" "" secret
   admin="$GITLAB_ADMIN_TOKEN"
   [ -n "$admin" ] || die "An admin token is required to create a service account (or re-run with --bot-token)."
   prompt_var SA_NAME     "Display name for the bot" "Claude"
@@ -224,16 +234,28 @@ write_env() {
   fi
 
   info "Collecting configuration…"
-  prompt_var GITLAB_BASE_URL "GitLab base URL (e.g. https://gitlab.example.com)"
+  echo
+  guide "Your GitLab instance's base address — the URL you log into, no trailing path."
+  guide "  e.g.  https://gitlab.example.com   (or https://gitlab.com for gitlab.com)"
+  prompt_var GITLAB_BASE_URL "GitLab base URL"
 
   if [ "$PROVISION_MODE" = "service-account" ]; then
     provision_service_account
   else
-    prompt_var GITLAB_BOT_TOKEN    "GitLab bot access token (api scope)" "" secret
-    prompt_var CLAUDE_BOT_USERNAME "Claude bot GitLab username" "claude-bot"
+    echo
+    guide "How to get a bot access token (project or group access token, scope: api):"
+    guide "  Project → Settings → Access tokens  (or Group → Settings → Access tokens)"
+    guide "  Role: Developer, Scopes: api, then Create. Copy the 'glpat-…' value."
+    guide "Creating that token also makes the bot user; use its username below"
+    guide "  (shown in the project/group Members list, e.g. 'project_123_bot')."
+    prompt_var GITLAB_BOT_TOKEN    "GitLab bot access token (glpat-…)" "" secret
+    prompt_var CLAUDE_BOT_USERNAME "Bot's GitLab username" "claude-bot"
   fi
 
-  prompt_var ANTHROPIC_API_KEY "Anthropic API key" "" secret
+  echo
+  guide "Your Anthropic API key — create one at:  https://console.anthropic.com/settings/keys"
+  guide "  (starts with 'sk-ant-'). This is what pays for Claude's work."
+  prompt_var ANTHROPIC_API_KEY "Anthropic API key (sk-ant-…)" "" secret
 
   if [ -z "${GITLAB_WEBHOOK_SECRET:-}" ]; then
     GITLAB_WEBHOOK_SECRET="$(openssl rand -hex 32)"

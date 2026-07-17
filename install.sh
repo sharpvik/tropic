@@ -484,6 +484,21 @@ PROJECTS_FULLY_WIRED=0
 setup_projects() {
   [ "${#PROJECTS[@]}" -gt 0 ] || return 0
   local hook_url token enc ssl existing member_ok hook_ok
+
+  # If provisioning didn't run this invocation (e.g. the .env already existed), we
+  # still need an admin token to add the bot as a member and manage webhooks — the
+  # bot's own token is only a Developer and can't create webhooks.
+  if [ -z "${ADMIN_TOKEN:-}" ]; then
+    echo
+    info "Wiring projects needs an admin token (to add membership + create webhooks)."
+    require_admin_token
+  fi
+  # Resolve the bot's user id if provisioning didn't set it (needed for membership).
+  if [ -z "$BOT_USER_ID" ] && [ -n "${ADMIN_TOKEN:-}" ] && [ -n "${CLAUDE_BOT_USERNAME:-}" ]; then
+    gl_api GET "/users?username=${CLAUDE_BOT_USERNAME}" "$ADMIN_TOKEN"
+    BOT_USER_ID="$(echo "$GL_BODY" | jq -r '.[0].id // empty' 2>/dev/null)"
+  fi
+
   hook_url="$(public_url)/webhook"
   token="${ADMIN_TOKEN:-$GITLAB_BOT_TOKEN}"
   ssl="false"; [ -n "$DOMAIN" ] && ssl="true"

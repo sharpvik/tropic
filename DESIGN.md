@@ -227,9 +227,10 @@ WORKSPACES_DIR=./workspaces
 
 ## 11. GitLab-side setup (one time)
 
-The bot identity is a **service account** by default — the installer creates it and its
-`api`-scoped token for you from a one-time admin token (never stored). See §14.2. If you
-can't/don't want to use a service account, run with `--bot-token` and do step 1–2 yourself.
+The bot identity is a **regular GitLab user** by default — the installer creates it and its
+`api`-scoped token for you from a one-time admin token (never stored), which works on all
+tiers. See §14.2. Use `--service-account` (Premium) or `--bot-token` (do steps 1–2 yourself)
+as alternatives.
 
 1. *(auto / manual)* A bot identity (`claude-bot`) with an `api`-scoped token. Add it to
    target projects (or the group) as **Developer** so it can be assigned issues + push.
@@ -307,14 +308,15 @@ Runs as root; fails fast (`set -euo pipefail`) with a clear message on any error
 5. **Interactive config** — if `/etc/gitlab-claude-agent.env` doesn't exist, prompt for the
    handful of required values and write it `chmod 600`, owned by `claude-agent`:
    - `GITLAB_BASE_URL`
-   - **Bot identity — service account by default.** The installer prompts for a one-time
-     **admin token**, then calls the GitLab **service accounts API** to create the account
-     (`POST /service_accounts`, or `/groups/:id/service_accounts` with `--group`) and an
-     `api`-scoped token for it (`POST /service_accounts/:id/personal_access_tokens`). The
-     admin token is used only during install and is **never written to disk**; only the
-     resulting service-account token is persisted as `GITLAB_BOT_TOKEN`, and
-     `CLAUDE_BOT_USERNAME` is set to the created account's username. With `--bot-token`, the
-     installer instead prompts for a pre-made `GITLAB_BOT_TOKEN` + `CLAUDE_BOT_USERNAME`.
+   - **Bot identity — a regular bot user by default (works on all tiers).** The installer
+     prompts for a one-time **admin token**, then calls the admin API to create a regular
+     user (`POST /users`) and an `api`-scoped token for it
+     (`POST /users/:id/personal_access_tokens`). The admin token is used only during install
+     and is **never written to disk**; only the resulting bot token is persisted as
+     `GITLAB_BOT_TOKEN`, and `CLAUDE_BOT_USERNAME` is set to the created username. Alternatives:
+     `--service-account` uses the service-accounts API instead (needs Premium/Ultimate);
+     `--group <id>` makes a group service account (needs group Owner + Premium); `--bot-token`
+     skips creation and prompts for a pre-made `GITLAB_BOT_TOKEN` + `CLAUDE_BOT_USERNAME`.
    - `ANTHROPIC_API_KEY`  (input hidden)
    - `GITLAB_WEBHOOK_SECRET` — **auto-generated** with `openssl rand -hex 32` if left blank
      (script echoes the generated value so the operator can paste it into GitLab).
@@ -337,13 +339,13 @@ Runs as root; fails fast (`set -euo pipefail`) with a clear message on any error
 
 ### 14.3 The GitLab-side checklist the script prints
 
-The service account + token are created automatically (default mode). What remains is
-adding that account to the projects and wiring the webhook — steps that need a human in the
-GitLab UI (the installer doesn't know which projects to target). So `install.sh` prints:
+The bot user + token are created automatically (default mode). What remains is adding that
+user to the projects and wiring the webhook — steps that need a human in the GitLab UI (the
+installer doesn't know which projects to target). So `install.sh` prints:
 
 ```
 ════════════════════════ GitLab setup (do this now) ════════════════════════
-1. Done for you: service account "claude-bot" and its api token were created.
+1. Done for you: bot user "claude-bot" and its api token were created.
       → Add "claude-bot" to each target project (or group) as Developer
         (Members → Invite) so it can be assigned issues and push branches.
 2. In each project (or the group):  Settings → Webhooks → Add webhook
@@ -355,7 +357,8 @@ GitLab UI (the installer doesn't know which projects to target). So `install.sh`
 ═════════════════════════════════════════════════════════════════════════════
 ```
 
-(With `--bot-token`, step 1 instead reminds you to create the bot user + token yourself.)
+(With `--service-account` step 1 creates a service account instead; with `--bot-token` it
+reminds you to create the bot user + token yourself.)
 
 > TLS note: for `https://` webhooks with SSL verification, run a reverse proxy (Caddy gets
 > you an auto-Let's-Encrypt cert in ~2 lines). The installer can offer to set this up when a

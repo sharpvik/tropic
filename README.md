@@ -20,26 +20,28 @@ dedicated `claude-agent` user, the systemd service, and your config, then **prin
 GitLab-side checklist and waits for you to press ENTER** before running a connectivity
 self-test.
 
-### Bot identity: service account (default)
+### Bot identity: auto-created bot user (default)
 
-By default the installer **creates a GitLab service account and its `api`-scoped token for
-you**. It prompts once for a GitLab **admin token**, calls the service-accounts API to
-create the account + token, then discards the admin token (only the resulting bot token is
-persisted). You'll be prompted for:
+By default the installer **creates a regular GitLab user for the bot and an `api`-scoped
+token for it** — this works on **all GitLab tiers** (Free/CE included). It prompts once for
+a GitLab **admin token**, calls the admin API (`POST /users` then
+`POST /users/:id/personal_access_tokens`), then discards the admin token (only the resulting
+bot token is persisted). You'll be prompted for:
 
 - `GITLAB_BASE_URL`
-- a one-time **admin token** (not stored) + the bot's display name/username
+- a one-time **admin token** (not stored) + the bot's display name / username / email
 - `ANTHROPIC_API_KEY`
 
-(the webhook secret is auto-generated). If you're **not** an instance admin, either use a
-**group** service account with `--group <id>` (needs group Owner + Premium), or supply your
-own pre-made token with `--bot-token` (then you'll be asked for `GITLAB_BOT_TOKEN` +
-`CLAUDE_BOT_USERNAME` instead).
+(the webhook secret is auto-generated). Requires an **instance admin** token. If you don't
+have one, supply a pre-made token with `--bot-token` instead (you'll be asked for
+`GITLAB_BOT_TOKEN` + `CLAUDE_BOT_USERNAME`). If you're on Premium/Ultimate and prefer a
+service account, use `--service-account` (or `--group <id>` for a group-level one).
 
 Flags (see `DESIGN.md` §14):
 
-- `--bot-token` — supply a pre-made api-scoped token instead of creating a service account
-- `--group <id>` — create a group-level service account instead of instance-level
+- `--bot-token` — supply a pre-made api-scoped token instead of creating the bot user
+- `--service-account` — create a service account (needs GitLab Premium/Ultimate)
+- `--group <id>` — create a group-level service account (implies `--service-account`)
 - `--repo <git-url>` — source repo to clone (defaults to a placeholder; set this)
 - `--ref <git-ref>` — branch/tag to install (default `main`)
 - `--domain example.com` — provision a Caddy TLS reverse proxy + real cert

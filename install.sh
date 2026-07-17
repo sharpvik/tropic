@@ -4,15 +4,17 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/your-org/gitlab-claude-agent/main/install.sh | sudo bash
 #
-# By default the installer CREATES a GitLab service account + api token for the bot,
-# using a one-time admin token you provide (it is never stored). Use --bot-token to
-# supply a pre-made token instead.
+# By default the installer CREATES a regular GitLab user for the bot and an api token
+# for it, using a one-time admin token you provide (it is never stored). This works on
+# all GitLab tiers (Free/CE included).
 #
 # Flags:
 #   --bot-token         Supply a pre-made api-scoped token + username instead of
-#                       auto-creating a service account.
-#   --group <id>        Create a GROUP service account under this group id (needs
-#                       Owner + Premium) instead of an instance-level one.
+#                       creating the bot user.
+#   --service-account   Create a GitLab service account instead of a regular user
+#                       (requires GitLab Premium/Ultimate).
+#   --group <id>        Create a GROUP service account under this group id (implies
+#                       --service-account; needs group Owner + Premium).
 #   --docker            Install via Docker instead of a native systemd service.
 #   --domain <fqdn>     Set up a Caddy TLS reverse proxy for this domain.
 #   --repo <git-url>    Override the source repo to clone (native install).
@@ -37,9 +39,10 @@ DOMAIN=""
 DO_UNINSTALL=0
 DO_PURGE=0
 # How the bot identity is obtained:
-#   service-account (default) — installer creates a GitLab service account + token
-#   token                     — you supply a pre-made api-scoped token + username
-PROVISION_MODE="service-account"
+#   user (default)   — installer creates a regular GitLab user + token (all tiers)
+#   service-account  — installer creates a GitLab service account (Premium/Ultimate)
+#   token            — you supply a pre-made api-scoped token + username
+PROVISION_MODE="user"
 GITLAB_GROUP_ID=""   # if set, create a group service account instead of instance-level
 
 # ---------------------------------------------------------------------------
@@ -87,7 +90,8 @@ parse_args() {
       --repo) REPO_URL="$2"; shift ;;
       --ref) REPO_REF="$2"; shift ;;
       --bot-token) PROVISION_MODE="token" ;;
-      --group) GITLAB_GROUP_ID="$2"; shift ;;
+      --service-account) PROVISION_MODE="service-account" ;;
+      --group) PROVISION_MODE="service-account"; GITLAB_GROUP_ID="$2"; shift ;;
       --uninstall) DO_UNINSTALL=1 ;;
       --purge) DO_PURGE=1 ;;
       *) die "Unknown flag: $1" ;;
@@ -178,40 +182,100 @@ gl_err_msg() {
     | head -c 300
 }
 
-# Create a GitLab service account and an api-scoped token for it, using a
-# one-time admin token that is NOT persisted anywhere. Sets GITLAB_BOT_TOKEN
-# and CLAUDE_BOT_USERNAME on success.
-provision_service_account() {
-  local base="${GITLAB_BASE_URL%/}" admin sa_name sa_user sa_path sa_id
+# Prompt for + validate a one-time admin token. Sets ADMIN_TOKEN. Verifies the
+# token authenticates and (unless allow_non_admin) that its user is an instance admin.
+ADMIN_TOKEN=""
+require_admin_token() {
+  local base="${GITLAB_BASE_URL%/}"
   echo
-  info "Provisioning a GitLab service account (used once; the admin token is not stored)."
-  echo
-  guide "How to get an ADMIN token (you need an account with Administrator access):"
+  guide "How to get an ADMIN token (an account with Administrator access):"
   guide "  1. Open:  ${base}/-/user_settings/personal_access_tokens"
   guide "     (or: top-right avatar → Edit profile → Access tokens)"
-  guide "  2. Name it e.g. 'bootstrap', set an expiry (tomorrow is fine — it's one-time)."
+  guide "  2. Name it 'bootstrap', set a short expiry (it's one-time)."
   guide "  3. Tick the  ${c_bold}api${c_reset}${c_dim}  scope, click 'Create personal access token'."
-  guide "  4. Copy the token shown (starts with 'glpat-') and paste it below."
-  guide "Not an admin? Press Ctrl-C and re-run with  --group <id>  or  --bot-token."
+  guide "  4. Copy the 'glpat-…' value and paste it below."
+  guide "Not an admin? Press Ctrl-C and re-run with  --bot-token."
   prompt_var GITLAB_ADMIN_TOKEN "GitLab ADMIN token (glpat-…, used once, not stored)" "" secret
-  admin="$GITLAB_ADMIN_TOKEN"
-  [ -n "$admin" ] || die "An admin token is required to create a service account (or re-run with --bot-token)."
-  prompt_var SA_NAME     "Display name for the bot" "Claude"
-  prompt_var SA_USERNAME "Username for the bot"     "claude-bot"
-  sa_name="$SA_NAME"; sa_user="$SA_USERNAME"
+  ADMIN_TOKEN="$GITLAB_ADMIN_TOKEN"
+  [ -n "$ADMIN_TOKEN" ] || die "An admin token is required (or re-run with --bot-token)."
 
-  # Sanity-check the token first so we can give a precise error.
-  gl_api GET /user "$admin"
+  gl_api GET /user "$ADMIN_TOKEN"
   if [ "$GL_CODE" != "200" ]; then
     err "The admin token was rejected by ${base} (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
     err "Check the token value and that GITLAB_BASE_URL is correct."
     die "Re-run with --bot-token to supply a pre-made token instead."
   fi
+}
+
+# Create a regular GitLab user for the bot + an api-scoped token, via the admin
+# API. Works on all tiers. Sets GITLAB_BOT_TOKEN and CLAUDE_BOT_USERNAME.
+provision_admin_user() {
+  local base="${GITLAB_BASE_URL%/}" sa_name sa_user sa_email uid host
+  echo
+  info "Provisioning a GitLab bot user (used once; the admin token is not stored)."
+  require_admin_token
+  if [ "$(echo "$GL_BODY" | jq -r '.is_admin // false')" != "true" ]; then
+    err "That token works, but its user is NOT an instance administrator, which is"
+    err "required to create users via the API."
+    die "Re-run with --bot-token to supply a pre-made token instead."
+  fi
+
+  prompt_var SA_NAME     "Display name for the bot" "Claude"
+  prompt_var SA_USERNAME "Username for the bot"     "claude-bot"
+  host="$(echo "$base" | sed -E 's#^https?://##; s#/.*$##')"
+  prompt_var SA_EMAIL    "Email for the bot user"   "${SA_USERNAME}@users.noreply.${host}"
+  sa_name="$SA_NAME"; sa_user="$SA_USERNAME"; sa_email="$SA_EMAIL"
+
+  info "Creating bot user '${sa_user}'…"
+  gl_api POST /users "$ADMIN_TOKEN" \
+    --data-urlencode "email=${sa_email}" \
+    --data-urlencode "username=${sa_user}" \
+    --data-urlencode "name=${sa_name}" \
+    --data-urlencode "force_random_password=true" \
+    --data-urlencode "skip_confirmation=true"
+  uid="$(echo "$GL_BODY" | jq -r '.id // empty' 2>/dev/null)"
+  if [ -z "$uid" ] && echo "$GL_BODY" | grep -qi 'already been taken'; then
+    warn "A user with that username/email already exists; reusing it."
+    gl_api GET "/users?username=${sa_user}" "$ADMIN_TOKEN"
+    uid="$(echo "$GL_BODY" | jq -r '.[0].id // empty' 2>/dev/null)"
+  fi
+  if [ -z "$uid" ]; then
+    err "Could not create the bot user (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
+    [ "$GL_CODE" = "403" ] && err "If your instance enforces Admin Mode, admin API via PAT can be blocked."
+    die "Re-run with --bot-token to supply a pre-made token instead."
+  fi
+  CLAUDE_BOT_USERNAME="$sa_user"
+  info "Bot user '${sa_user}' ready (id ${uid})."
+
+  info "Creating an api-scoped token for the bot user…"
+  gl_api POST "/users/${uid}/personal_access_tokens" "$ADMIN_TOKEN" \
+    --data-urlencode "name=gitlab-claude-agent" --data-urlencode "scopes[]=api"
+  GITLAB_BOT_TOKEN="$(echo "$GL_BODY" | jq -r '.token // empty' 2>/dev/null)"
+  [ -n "$GITLAB_BOT_TOKEN" ] || die "Bot user created but token generation failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
+  info "Bot token created."
+  unset GITLAB_ADMIN_TOKEN ADMIN_TOKEN
+}
+
+# Create a GitLab service account and an api-scoped token for it, using a
+# one-time admin token that is NOT persisted anywhere. Sets GITLAB_BOT_TOKEN
+# and CLAUDE_BOT_USERNAME on success.
+provision_service_account() {
+  local admin sa_name sa_user sa_path sa_id
+  echo
+  info "Provisioning a GitLab service account (used once; the admin token is not stored)."
+  echo
+  guide "Note: service accounts require GitLab Premium/Ultimate. On Free/CE, press Ctrl-C"
+  guide "and re-run without --service-account (the default creates a regular bot user)."
+  require_admin_token
+  admin="$ADMIN_TOKEN"
   if [ -z "$GITLAB_GROUP_ID" ] && [ "$(echo "$GL_BODY" | jq -r '.is_admin // false')" != "true" ]; then
     err "That token works, but its user is NOT an instance administrator, which is required"
     err "to create an instance-level service account."
-    die "Re-run with  --group <id>  (group Owner + Premium) or  --bot-token."
+    die "Re-run with  --group <id>  (group Owner + Premium) or without --service-account."
   fi
+  prompt_var SA_NAME     "Display name for the bot" "Claude"
+  prompt_var SA_USERNAME "Username for the bot"     "claude-bot"
+  sa_name="$SA_NAME"; sa_user="$SA_USERNAME"
 
   # Instance-level by default; group-level when --group is given (needs Owner + Premium).
   if [ -n "$GITLAB_GROUP_ID" ]; then
@@ -233,9 +297,14 @@ provision_service_account() {
     err "Could not create the service account (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
     case "$GL_CODE" in
       403) err "The token lacks the rights to create service accounts here." ;;
-      404) err "The service-accounts API isn't available (GitLab < 15.4, or --group id wrong)." ;;
+      404) err "The service-accounts API isn't available on this instance. Service accounts"
+           err "require GitLab ${c_bold}Premium or Ultimate${c_reset}; a Free/CE instance returns 404 here." ;;
     esac
-    die "Re-run with --bot-token to supply a pre-made token instead."
+    err ""
+    err "→ Recommended for Free/CE: re-run with ${c_bold}--bot-token${c_reset} and use a project or group"
+    err "  access token (works on all tiers; it auto-creates the bot user). The installer"
+    err "  will show you exactly where to create it."
+    die "Re-run with --bot-token."
   fi
   CLAUDE_BOT_USERNAME="$(echo "$GL_BODY" | jq -r '.username')"
   info "Created service account '${CLAUDE_BOT_USERNAME}' (id ${sa_id})."
@@ -253,7 +322,7 @@ provision_service_account() {
   [ -n "$GITLAB_BOT_TOKEN" ] || die "Service account created but token generation failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
   info "Service account token created."
   # Scrub the admin token from the environment.
-  unset GITLAB_ADMIN_TOKEN admin
+  unset GITLAB_ADMIN_TOKEN ADMIN_TOKEN admin
 }
 
 GENERATED_SECRET=""
@@ -272,18 +341,20 @@ write_env() {
   guide "  e.g.  https://gitlab.example.com   (or https://gitlab.com for gitlab.com)"
   prompt_var GITLAB_BASE_URL "GitLab base URL"
 
-  if [ "$PROVISION_MODE" = "service-account" ]; then
-    provision_service_account
-  else
-    echo
-    guide "How to get a bot access token (project or group access token, scope: api):"
-    guide "  Project → Settings → Access tokens  (or Group → Settings → Access tokens)"
-    guide "  Role: Developer, Scopes: api, then Create. Copy the 'glpat-…' value."
-    guide "Creating that token also makes the bot user; use its username below"
-    guide "  (shown in the project/group Members list, e.g. 'project_123_bot')."
-    prompt_var GITLAB_BOT_TOKEN    "GitLab bot access token (glpat-…)" "" secret
-    prompt_var CLAUDE_BOT_USERNAME "Bot's GitLab username" "claude-bot"
-  fi
+  case "$PROVISION_MODE" in
+    user)            provision_admin_user ;;
+    service-account) provision_service_account ;;
+    token)
+      echo
+      guide "How to get a bot access token (project or group access token, scope: api):"
+      guide "  Project → Settings → Access tokens  (or Group → Settings → Access tokens)"
+      guide "  Role: Developer, Scopes: api, then Create. Copy the 'glpat-…' value."
+      guide "Creating that token also makes the bot user; use its username below"
+      guide "  (shown in the project/group Members list, e.g. 'project_123_bot')."
+      prompt_var GITLAB_BOT_TOKEN    "GitLab bot access token (glpat-…)" "" secret
+      prompt_var CLAUDE_BOT_USERNAME "Bot's GitLab username" "claude-bot"
+      ;;
+  esac
 
   echo
   guide "Your Anthropic API key — create one at:  https://console.anthropic.com/settings/keys"
@@ -405,18 +476,28 @@ print_gitlab_checklist() {
 
   echo
   echo "${c_bold}════════════════════════ GitLab setup (do this now) ════════════════════════${c_reset}"
-  if [ "$PROVISION_MODE" = "service-account" ]; then
-    cat <<EOF
+  case "$PROVISION_MODE" in
+    user)
+      cat <<EOF
+ 1. ${c_green}Done for you:${c_reset} bot user "${bot}" and its api token were created.
+    → Add "${bot}" to each target project (or group) as  Developer
+       (Members → Invite) so it can be assigned issues and push branches.
+EOF
+      ;;
+    service-account)
+      cat <<EOF
  1. ${c_green}Done for you:${c_reset} service account "${bot}" and its api token were created.
     → Add "${bot}" to each target project (or group) as  Developer
        (Members → Invite) so it can be assigned issues and push branches.
 EOF
-  else
-    cat <<EOF
+      ;;
+    *)
+      cat <<EOF
  1. Create/confirm the bot user  "${bot}"  with an api-scoped token, and add it to
     each target project (or group) as  Developer  (can push branches + open MRs).
 EOF
-  fi
+      ;;
+  esac
   cat <<EOF
 
  2. In each project (or the group):  Settings → Webhooks → Add webhook

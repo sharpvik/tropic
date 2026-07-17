@@ -63,17 +63,7 @@ export function parseAssignmentHook(
   const project = hook.project;
   if (!attrs?.iid || !project?.id || !project.path_with_namespace) return null;
 
-  // Must be a change to assignees (an update event carrying an assignee delta).
-  const change = hook.changes?.assignees;
-  if (!change) return null;
-
-  const nowAssigned = hasUser(change.current, botUsername);
-  const wasAssigned = hasUser(change.previous, botUsername);
-
-  // Fire only on the false -> true transition.
-  if (!nowAssigned || wasAssigned) return null;
-
-  return {
+  const job: IssueJobPayload = {
     projectId: project.id,
     issueIid: attrs.iid,
     title: attrs.title ?? `Issue #${attrs.iid}`,
@@ -81,4 +71,21 @@ export function parseAssignmentHook(
     projectPath: project.path_with_namespace,
     dedupeKey: `${project.id}:${attrs.iid}:assigned`,
   };
+
+  // Case 1: the issue was *created* already assigned to the bot. On "open" there is
+  // no assignee transition to inspect, so use the current assignee list.
+  if (attrs.action === "open") {
+    return hasUser(hook.assignees, botUsername) ? job : null;
+  }
+
+  // Case 2: an existing issue was *updated* — fire only on the false -> true
+  // transition of the bot's assignment (avoids re-firing on unrelated edits).
+  const change = hook.changes?.assignees;
+  if (!change) return null;
+
+  const nowAssigned = hasUser(change.current, botUsername);
+  const wasAssigned = hasUser(change.previous, botUsername);
+  if (!nowAssigned || wasAssigned) return null;
+
+  return job;
 }

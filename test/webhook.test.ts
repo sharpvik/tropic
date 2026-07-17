@@ -62,6 +62,43 @@ describe("parseAssignmentHook", () => {
     expect(job).toBeNull();
   });
 
+  it("fires when an issue is created already assigned to the bot (action=open)", () => {
+    const job = parseAssignmentHook(
+      hook({
+        object_attributes: { iid: 42, action: "open", title: "New", description: "d" },
+        assignees: [{ username: BOT }],
+        changes: {}, // no assignee transition on creation
+      }),
+      BOT,
+    );
+    expect(job).not.toBeNull();
+    expect(job).toMatchObject({ issueIid: 42, dedupeKey: "7:42:assigned" });
+  });
+
+  it("does not fire when an issue is created assigned to someone else", () => {
+    const job = parseAssignmentHook(
+      hook({
+        object_attributes: { iid: 42, action: "open", title: "New" },
+        assignees: [{ username: "alice" }],
+        changes: {},
+      }),
+      BOT,
+    );
+    expect(job).toBeNull();
+  });
+
+  it("does not fire when an issue is created with no assignee", () => {
+    const job = parseAssignmentHook(
+      hook({
+        object_attributes: { iid: 42, action: "open", title: "New" },
+        assignees: [],
+        changes: {},
+      }),
+      BOT,
+    );
+    expect(job).toBeNull();
+  });
+
   it("ignores non-issue events", () => {
     expect(parseAssignmentHook(hook({ object_kind: "merge_request" }), BOT)).toBeNull();
   });

@@ -28,8 +28,11 @@ COPY --from=build /app/dist ./dist
 RUN mkdir -p /data /workspaces
 
 # Runs as root (uid 0). HOME is writable for ~/.claude + toolchain caches.
+# IS_SANDBOX=1 tells the Claude Code CLI it's in a sandbox, so it permits
+# --dangerously-skip-permissions (bypassPermissions) despite running as root.
 ENV NODE_ENV=production \
     HOME=/root \
+    IS_SANDBOX=1 \
     PORT=8080 \
     DATA_DIR=/data \
     WORKSPACES_DIR=/workspaces

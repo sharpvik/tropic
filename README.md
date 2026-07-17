@@ -16,13 +16,30 @@ curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh \
 ```
 
 `bash -s --` passes the flags through to the piped script. The installer sets up Node, a
-dedicated `claude-agent` user, the systemd service, and your config (prompting for the
-GitLab URL, bot token, and Anthropic key, and auto-generating the webhook secret), then
-**prints the GitLab-side checklist and waits for you to press ENTER** before running a
-connectivity self-test.
+dedicated `claude-agent` user, the systemd service, and your config, then **prints the
+GitLab-side checklist and waits for you to press ENTER** before running a connectivity
+self-test.
+
+### Bot identity: service account (default)
+
+By default the installer **creates a GitLab service account and its `api`-scoped token for
+you**. It prompts once for a GitLab **admin token**, calls the service-accounts API to
+create the account + token, then discards the admin token (only the resulting bot token is
+persisted). You'll be prompted for:
+
+- `GITLAB_BASE_URL`
+- a one-time **admin token** (not stored) + the bot's display name/username
+- `ANTHROPIC_API_KEY`
+
+(the webhook secret is auto-generated). If you're **not** an instance admin, either use a
+**group** service account with `--group <id>` (needs group Owner + Premium), or supply your
+own pre-made token with `--bot-token` (then you'll be asked for `GITLAB_BOT_TOKEN` +
+`CLAUDE_BOT_USERNAME` instead).
 
 Flags (see `DESIGN.md` §14):
 
+- `--bot-token` — supply a pre-made api-scoped token instead of creating a service account
+- `--group <id>` — create a group-level service account instead of instance-level
 - `--repo <git-url>` — source repo to clone (defaults to a placeholder; set this)
 - `--ref <git-ref>` — branch/tag to install (default `main`)
 - `--domain example.com` — provision a Caddy TLS reverse proxy + real cert

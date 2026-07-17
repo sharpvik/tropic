@@ -4,7 +4,15 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/your-org/gitlab-claude-agent/main/install.sh | sudo bash
 #
+# By default the installer CREATES a GitLab service account + api token for the bot,
+# using a one-time admin token you provide (it is never stored). Use --bot-token to
+# supply a pre-made token instead.
+#
 # Flags:
+#   --bot-token         Supply a pre-made api-scoped token + username instead of
+#                       auto-creating a service account.
+#   --group <id>        Create a GROUP service account under this group id (needs
+#                       Owner + Premium) instead of an instance-level one.
 #   --docker            Install via Docker instead of a native systemd service.
 #   --domain <fqdn>     Set up a Caddy TLS reverse proxy for this domain.
 #   --repo <git-url>    Override the source repo to clone (native install).
@@ -28,6 +36,11 @@ MODE="native"
 DOMAIN=""
 DO_UNINSTALL=0
 DO_PURGE=0
+# How the bot identity is obtained:
+#   service-account (default) — installer creates a GitLab service account + token
+#   token                     — you supply a pre-made api-scoped token + username
+PROVISION_MODE="service-account"
+GITLAB_GROUP_ID=""   # if set, create a group service account instead of instance-level
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,6 +84,8 @@ parse_args() {
       --domain) DOMAIN="$2"; shift ;;
       --repo) REPO_URL="$2"; shift ;;
       --ref) REPO_REF="$2"; shift ;;
+      --bot-token) PROVISION_MODE="token" ;;
+      --group) GITLAB_GROUP_ID="$2"; shift ;;
       --uninstall) DO_UNINSTALL=1 ;;
       --purge) DO_PURGE=1 ;;
       *) die "Unknown flag: $1" ;;
@@ -88,10 +103,10 @@ preflight() {
 }
 
 install_base_packages() {
-  info "Installing base packages (git, curl, ca-certificates, openssl)…"
+  info "Installing base packages (git, curl, ca-certificates, openssl, jq)…"
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    git curl ca-certificates openssl gnupg >/dev/null
+    git curl ca-certificates openssl gnupg jq >/dev/null
 }
 
 install_node() {
@@ -139,6 +154,65 @@ build_app() {
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+# Create a GitLab service account and an api-scoped token for it, using a
+# one-time admin token that is NOT persisted anywhere. Sets GITLAB_BOT_TOKEN
+# and CLAUDE_BOT_USERNAME on success.
+provision_service_account() {
+  local base="${GITLAB_BASE_URL%/}" admin sa_name sa_user sa_path sa_json sa_id tok_json
+  echo
+  info "Provisioning a GitLab service account (used once; the admin token is not stored)."
+  prompt_var GITLAB_ADMIN_TOKEN "GitLab ADMIN token (used once to create the service account)" "" secret
+  admin="$GITLAB_ADMIN_TOKEN"
+  [ -n "$admin" ] || die "An admin token is required to create a service account (or re-run with --bot-token)."
+  prompt_var SA_NAME     "Display name for the bot" "Claude"
+  prompt_var SA_USERNAME "Username for the bot"     "claude-bot"
+  sa_name="$SA_NAME"; sa_user="$SA_USERNAME"
+
+  # Instance-level by default; group-level when --group is given (needs Owner + Premium).
+  if [ -n "$GITLAB_GROUP_ID" ]; then
+    sa_path="/groups/${GITLAB_GROUP_ID}/service_accounts"
+  else
+    sa_path="/service_accounts"
+  fi
+
+  info "Creating service account '${sa_user}'…"
+  sa_json="$(curl -fsS -X POST \
+    --header "PRIVATE-TOKEN: ${admin}" \
+    --data-urlencode "name=${sa_name}" \
+    --data-urlencode "username=${sa_user}" \
+    "${base}/api/v4${sa_path}" 2>/dev/null)" || sa_json=""
+
+  if [ -z "$sa_json" ] || [ "$(echo "$sa_json" | jq -r '.id // empty')" = "" ]; then
+    err "Could not create the service account. The token may lack admin/owner rights,"
+    err "or your GitLab is older than 15.4. Response: $(echo "${sa_json:-<none>}" | head -c 300)"
+    die "Re-run with --bot-token to supply a pre-made token instead."
+  fi
+  sa_id="$(echo "$sa_json" | jq -r '.id')"
+  # GitLab may adjust the username (e.g. on collision); trust what it returns.
+  CLAUDE_BOT_USERNAME="$(echo "$sa_json" | jq -r '.username')"
+  info "Created service account '${CLAUDE_BOT_USERNAME}' (id ${sa_id})."
+
+  info "Creating an api-scoped token for the service account…"
+  local tok_path
+  if [ -n "$GITLAB_GROUP_ID" ]; then
+    tok_path="/groups/${GITLAB_GROUP_ID}/service_accounts/${sa_id}/personal_access_tokens"
+  else
+    tok_path="/service_accounts/${sa_id}/personal_access_tokens"
+  fi
+  tok_json="$(curl -fsS -X POST \
+    --header "PRIVATE-TOKEN: ${admin}" \
+    --data-urlencode "name=gitlab-claude-agent" \
+    --data-urlencode "scopes[]=api" \
+    "${base}/api/v4${tok_path}" 2>/dev/null)" || tok_json=""
+
+  GITLAB_BOT_TOKEN="$(echo "${tok_json:-}" | jq -r '.token // empty')"
+  [ -n "$GITLAB_BOT_TOKEN" ] || die "Service account created but token generation failed: $(echo "${tok_json:-<none>}" | head -c 300)"
+  info "Service account token created."
+  # Scrub the admin token from the environment.
+  unset GITLAB_ADMIN_TOKEN admin
+}
+
 GENERATED_SECRET=""
 write_env() {
   if [ -f "$ENV_FILE" ]; then
@@ -150,10 +224,16 @@ write_env() {
   fi
 
   info "Collecting configuration…"
-  prompt_var GITLAB_BASE_URL     "GitLab base URL (e.g. https://gitlab.example.com)"
-  prompt_var GITLAB_BOT_TOKEN    "GitLab bot access token (api scope)" "" secret
-  prompt_var ANTHROPIC_API_KEY   "Anthropic API key" "" secret
-  prompt_var CLAUDE_BOT_USERNAME "Claude bot GitLab username" "claude-bot"
+  prompt_var GITLAB_BASE_URL "GitLab base URL (e.g. https://gitlab.example.com)"
+
+  if [ "$PROVISION_MODE" = "service-account" ]; then
+    provision_service_account
+  else
+    prompt_var GITLAB_BOT_TOKEN    "GitLab bot access token (api scope)" "" secret
+    prompt_var CLAUDE_BOT_USERNAME "Claude bot GitLab username" "claude-bot"
+  fi
+
+  prompt_var ANTHROPIC_API_KEY "Anthropic API key" "" secret
 
   if [ -z "${GITLAB_WEBHOOK_SECRET:-}" ]; then
     GITLAB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
@@ -263,25 +343,34 @@ public_url() {
 }
 
 print_gitlab_checklist() {
-  local url secret
+  local url secret bot
   url="$(public_url)"
   secret="${GENERATED_SECRET:-<your GITLAB_WEBHOOK_SECRET>}"
+  bot="${CLAUDE_BOT_USERNAME:-claude-bot}"
+
+  echo
+  echo "${c_bold}════════════════════════ GitLab setup (do this now) ════════════════════════${c_reset}"
+  if [ "$PROVISION_MODE" = "service-account" ]; then
+    cat <<EOF
+ 1. ${c_green}Done for you:${c_reset} service account "${bot}" and its api token were created.
+    → Add "${bot}" to each target project (or group) as  Developer
+       (Members → Invite) so it can be assigned issues and push branches.
+EOF
+  else
+    cat <<EOF
+ 1. Create/confirm the bot user  "${bot}"  with an api-scoped token, and add it to
+    each target project (or group) as  Developer  (can push branches + open MRs).
+EOF
+  fi
   cat <<EOF
 
-${c_bold}════════════════════════ GitLab setup (do this now) ════════════════════════${c_reset}
- 1. Create/confirm the bot user  "${CLAUDE_BOT_USERNAME:-claude-bot}"  and add it to each
-    target project as  Developer  (can push branches + open MRs).
-
- 2. Create a project or group  access token  with scope:  api
-       (you already provided this token to the installer)
-
- 3. In each project (or the group):  Settings → Webhooks → Add webhook
+ 2. In each project (or the group):  Settings → Webhooks → Add webhook
        URL:           ${url}/webhook
        Secret token:  ${secret}
        Trigger:       [x] Issues events   (leave everything else unchecked)
        SSL verify:    [x] recommended (needs a TLS domain — see --domain)
 
- 4. (Optional) Add a CLAUDE.md to each repo with your coding standards.
+ 3. (Optional) Add a CLAUDE.md to each repo with your coding standards.
 ${c_bold}═════════════════════════════════════════════════════════════════════════════${c_reset}
 
 EOF

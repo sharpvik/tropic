@@ -38,7 +38,7 @@ DO_UNINSTALL=0
 DO_PURGE=0
 PROVISION_MODE="user"   # user | token
 PROJECTS=()
-GROUPS=()
+GROUP_TARGETS=()        # NB: not GROUPS — that's a special read-only bash builtin
 BOT_USER_ID=""
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --bot-token) PROVISION_MODE="token" ;;
-      --group)   GROUPS+=("$2"); shift ;;
+      --group)   GROUP_TARGETS+=("$2"); shift ;;
       --project) PROJECTS+=("$2"); shift ;;
       --domain)  DOMAIN="$2"; shift ;;
       --ref)     REPO_REF="$2"; shift ;;
@@ -366,12 +366,12 @@ acquire_admin_and_bot_id() {
 # --group: add the bot as a Developer member of each group (access to all its projects).
 GROUPS_WIRED=0
 setup_group() {
-  [ "${#GROUPS[@]}" -gt 0 ] || return 0
+  [ "${#GROUP_TARGETS[@]}" -gt 0 ] || return 0
   acquire_admin_and_bot_id
   echo
-  info "Adding the bot to ${#GROUPS[@]} group(s) as Developer…"
+  info "Adding the bot to ${#GROUP_TARGETS[@]} group(s) as Developer…"
   local g enc
-  for g in "${GROUPS[@]}"; do
+  for g in "${GROUP_TARGETS[@]}"; do
     enc="${g//\//%2F}"
     if [ -n "${ADMIN_TOKEN:-}" ] && [ -n "$BOT_USER_ID" ]; then
       gl_api POST "/groups/${enc}/members" "$ADMIN_TOKEN" \

@@ -387,9 +387,13 @@ left to do in the GitLab UI.
 
 ### 14.4 Uninstall
 
-`install.sh --uninstall` stops+disables the unit, removes the app dir, and (with
-confirmation) the `claude-agent` user, leaving `/etc/gitlab-claude-agent.env` in place
-unless `--purge` is also given.
+`install.sh --uninstall` stops + removes the running deployment (systemd unit and/or the
+Docker container) but **keeps** the repo (`/opt/gitlab-claude-agent`), the config
+(`/etc/gitlab-claude-agent.env`), the `claude-agent` user, and the data — so a reinstall is
+just `sudo bash /opt/gitlab-claude-agent/install.sh` with no re-clone or re-provisioning.
+
+`--purge` (with `--uninstall`) is the full wipe: repo, config, user, and Docker volumes. It
+re-execs from `/tmp` first so it can safely delete the app dir containing the script.
 
 ---
 

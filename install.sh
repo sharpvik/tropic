@@ -25,8 +25,10 @@
 #   --repo <git-url>    Override the source repo to clone (default: this project;
 #                       only needed for forks or a local path).
 #   --ref <git-ref>     Branch/tag to install (default: main).
-#   --uninstall         Stop and remove the service.
-#   --purge             With --uninstall, also remove config + data.
+#   --uninstall         Stop + remove the running service (systemd unit / container),
+#                       but KEEP the repo, config, user, and data for easy reinstall.
+#   --purge             With --uninstall, also remove the repo, config, user, and
+#                       Docker volumes (full wipe).
 #
 set -euo pipefail
 
@@ -659,23 +661,29 @@ EOF
 # Uninstall
 # ---------------------------------------------------------------------------
 uninstall() {
-  info "Uninstalling ${APP_NAME}…"
+  info "Stopping ${APP_NAME}…"
   # Tear down whichever deployment is present (don't rely on --docker/--native here).
   if command -v docker >/dev/null 2>&1 && [ -f "${APP_DIR}/docker-compose.yml" ]; then
     ( cd "$APP_DIR" && docker compose down 2>/dev/null || true )
   fi
   systemctl disable --now "$APP_NAME" 2>/dev/null || true
   rm -f "$SERVICE_FILE"; systemctl daemon-reload 2>/dev/null || true
-  rm -rf "$APP_DIR"
+
   if [ "$DO_PURGE" -eq 1 ]; then
+    # Full wipe: repo, config, user, and Docker volumes.
+    rm -rf "$APP_DIR"
     rm -f "$ENV_FILE"
     if id "$APP_USER" >/dev/null 2>&1; then userdel -r "$APP_USER" 2>/dev/null || true; fi
     if command -v docker >/dev/null 2>&1; then
       docker volume rm gitlab-claude-agent_claude-data gitlab-claude-agent_claude-workspaces 2>/dev/null || true
     fi
-    info "Purged config, data, user, and Docker volumes."
+    info "Purged everything: repo (${APP_DIR}), config, user, and Docker volumes."
   else
-    info "Left ${ENV_FILE}, user '${APP_USER}', and Docker volumes in place (use --purge to remove)."
+    # Keep the repo + config so a reinstall is trivial and doesn't re-clone.
+    info "Service stopped and removed."
+    info "Kept: ${APP_DIR} (source + data), ${ENV_FILE}, user '${APP_USER}', Docker volumes."
+    info "Reinstall with:  sudo bash ${APP_DIR}/install.sh   (or update.sh)"
+    info "Full wipe with:  sudo bash ${APP_DIR}/install.sh --uninstall --purge"
   fi
 }
 
@@ -687,6 +695,15 @@ main() {
   need_root
 
   if [ "$DO_UNINSTALL" -eq 1 ]; then
+    # --purge deletes APP_DIR (which may hold this very script). If we're running
+    # from inside it, re-exec from a temp copy so we don't delete ourselves mid-run.
+    if [ "$DO_PURGE" -eq 1 ] && [ "${_GCA_RELOCATED:-}" != "1" ] && [ -f "$0" ]; then
+      case "$0" in
+        "$APP_DIR"/*)
+          _t="$(mktemp /tmp/gca-uninstall-XXXXXX.sh)"; cp "$0" "$_t"
+          exec env _GCA_RELOCATED=1 bash "$_t" "$@" ;;
+      esac
+    fi
     uninstall
     exit 0
   fi

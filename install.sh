@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+#
+# gitlab-claude-agent — one-command installer for a fresh Ubuntu VM.
+#
+#   curl -fsSL https://raw.githubusercontent.com/your-org/gitlab-claude-agent/main/install.sh | sudo bash
+#
+# Flags:
+#   --docker            Install via Docker instead of a native systemd service.
+#   --domain <fqdn>     Set up a Caddy TLS reverse proxy for this domain.
+#   --repo <git-url>    Override the source repo to clone (native install).
+#   --ref <git-ref>     Branch/tag to install (default: main).
+#   --uninstall         Stop and remove the service.
+#   --purge             With --uninstall, also remove config + data.
+#
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+APP_NAME="gitlab-claude-agent"
+APP_USER="claude-agent"
+APP_DIR="/opt/${APP_NAME}"
+ENV_FILE="/etc/${APP_NAME}.env"
+SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
+REPO_URL="${REPO_URL:-https://github.com/your-org/gitlab-claude-agent.git}"
+REPO_REF="main"
+MODE="native"
+DOMAIN=""
+DO_UNINSTALL=0
+DO_PURGE=0
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+c_reset=$'\e[0m'; c_bold=$'\e[1m'; c_green=$'\e[32m'; c_yellow=$'\e[33m'; c_red=$'\e[31m'
+info()  { echo "${c_green}==>${c_reset} $*"; }
+warn()  { echo "${c_yellow}!!${c_reset} $*"; }
+err()   { echo "${c_red}xx${c_reset} $*" >&2; }
+die()   { err "$*"; exit 1; }
+
+need_root() { [ "$(id -u)" -eq 0 ] || die "Please run as root (use: sudo bash install.sh)"; }
+
+# Read a value interactively unless it's already set in the environment.
+# usage: prompt_var VAR "Prompt text" [default] [secret]
+prompt_var() {
+  local var="$1" prompt="$2" default="${3:-}" secret="${4:-}"
+  local current="${!var:-}"
+  if [ -n "$current" ]; then return; fi
+  if [ ! -t 0 ]; then
+    # Non-interactive and unset: fall back to default or fail for required vars.
+    [ -n "$default" ] && { printf -v "$var" '%s' "$default"; return; }
+    die "$var is required but stdin is not a TTY (set it in the environment)."
+  fi
+  local input
+  if [ -n "$secret" ]; then
+    read -r -s -p "${prompt}: " input; echo
+  else
+    read -r -p "${prompt}${default:+ [$default]}: " input
+  fi
+  printf -v "$var" '%s' "${input:-$default}"
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --docker) MODE="docker" ;;
+      --domain) DOMAIN="$2"; shift ;;
+      --repo) REPO_URL="$2"; shift ;;
+      --ref) REPO_REF="$2"; shift ;;
+      --uninstall) DO_UNINSTALL=1 ;;
+      --purge) DO_PURGE=1 ;;
+      *) die "Unknown flag: $1" ;;
+    esac
+    shift
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+preflight() {
+  command -v apt-get >/dev/null 2>&1 || die "This installer targets Debian/Ubuntu (apt). For other distros use the Docker image."
+  info "Preflight OK (apt-based system detected)."
+}
+
+install_base_packages() {
+  info "Installing base packages (git, curl, ca-certificates, openssl)…"
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    git curl ca-certificates openssl gnupg >/dev/null
+}
+
+install_node() {
+  if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; then
+    info "Node $(node -v) already present."
+    return
+  fi
+  info "Installing Node.js 22 LTS from NodeSource…"
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >/dev/null
+  info "Installed Node $(node -v)."
+}
+
+ensure_user() {
+  if ! id "$APP_USER" >/dev/null 2>&1; then
+    info "Creating service user '${APP_USER}'…"
+    useradd --system --create-home --home-dir "/home/${APP_USER}" --shell /usr/sbin/nologin "$APP_USER"
+  fi
+}
+
+fetch_app() {
+  info "Fetching application into ${APP_DIR}…"
+  if [ -d "${APP_DIR}/.git" ]; then
+    git -C "$APP_DIR" fetch --depth 1 origin "$REPO_REF"
+    git -C "$APP_DIR" checkout -f "$REPO_REF"
+    git -C "$APP_DIR" reset --hard "origin/${REPO_REF}" || true
+  else
+    rm -rf "$APP_DIR"
+    git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$APP_DIR"
+  fi
+  mkdir -p "${APP_DIR}/workspaces" "${APP_DIR}/data"
+  chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+}
+
+build_app() {
+  info "Building (installing dev deps, compiling TypeScript)…"
+  # Dev deps are needed to compile; the built dist/ then runs on --omit=dev deps.
+  ( cd "$APP_DIR" && npm ci --silent && npm run build --silent && npm prune --omit=dev --silent )
+  chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+GENERATED_SECRET=""
+write_env() {
+  if [ -f "$ENV_FILE" ]; then
+    info "Config ${ENV_FILE} already exists; keeping it. (Delete it to reconfigure.)"
+    # shellcheck disable=SC1090
+    set -a; . "$ENV_FILE"; set +a
+    GENERATED_SECRET="${GITLAB_WEBHOOK_SECRET:-}"
+    return
+  fi
+
+  info "Collecting configuration…"
+  prompt_var GITLAB_BASE_URL     "GitLab base URL (e.g. https://gitlab.example.com)"
+  prompt_var GITLAB_BOT_TOKEN    "GitLab bot access token (api scope)" "" secret
+  prompt_var ANTHROPIC_API_KEY   "Anthropic API key" "" secret
+  prompt_var CLAUDE_BOT_USERNAME "Claude bot GitLab username" "claude-bot"
+
+  if [ -z "${GITLAB_WEBHOOK_SECRET:-}" ]; then
+    GITLAB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+    GENERATED_SECRET="$GITLAB_WEBHOOK_SECRET"
+    info "Generated a webhook secret (shown in the GitLab checklist below)."
+  fi
+
+  umask 077
+  cat > "$ENV_FILE" <<EOF
+PORT=8080
+GITLAB_BASE_URL=${GITLAB_BASE_URL}
+GITLAB_WEBHOOK_SECRET=${GITLAB_WEBHOOK_SECRET}
+GITLAB_BOT_TOKEN=${GITLAB_BOT_TOKEN}
+CLAUDE_BOT_USERNAME=${CLAUDE_BOT_USERNAME}
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+MAX_CONCURRENCY=2
+JOB_TIMEOUT_MS=1800000
+MAX_TURNS=40
+WORKSPACES_DIR=${APP_DIR}/workspaces
+DATA_DIR=${APP_DIR}/data
+BOT_GIT_USERNAME=${CLAUDE_BOT_USERNAME}
+BOT_GIT_EMAIL=${CLAUDE_BOT_USERNAME}@users.noreply.gitlab
+EOF
+  chown "$APP_USER":"$APP_USER" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  info "Wrote ${ENV_FILE} (chmod 600)."
+}
+
+# ---------------------------------------------------------------------------
+# Native (systemd) install
+# ---------------------------------------------------------------------------
+install_service() {
+  info "Installing systemd unit…"
+  install -m 0644 "${APP_DIR}/systemd/${APP_NAME}.service" "$SERVICE_FILE"
+  systemctl daemon-reload
+  systemctl enable --now "$APP_NAME"
+  sleep 2
+  if ! systemctl is-active --quiet "$APP_NAME"; then
+    err "Service failed to start. Last log lines:"
+    journalctl -u "$APP_NAME" -n 20 --no-pager || true
+    die "Aborting."
+  fi
+  # Health check
+  local port; port="$(grep -E '^PORT=' "$ENV_FILE" | cut -d= -f2)"
+  if curl -fsS "http://localhost:${port:-8080}/healthz" >/dev/null; then
+    info "Service is active and /healthz responds."
+  else
+    warn "Service is active but /healthz did not respond yet; check logs."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Docker install
+# ---------------------------------------------------------------------------
+install_docker_engine() {
+  if command -v docker >/dev/null 2>&1; then
+    info "Docker already installed."
+    return
+  fi
+  info "Installing Docker Engine…"
+  curl -fsSL https://get.docker.com | sh >/dev/null
+}
+
+install_docker() {
+  install_docker_engine
+  # Reuse the env file as the container's env_file.
+  cp "$ENV_FILE" "${APP_DIR}/${APP_NAME}.env" 2>/dev/null || true
+  info "Building and starting the container…"
+  ( cd "$APP_DIR" && docker compose --env-file "$ENV_FILE" up -d --build )
+  sleep 3
+  local port; port="$(grep -E '^PORT=' "$ENV_FILE" | cut -d= -f2)"
+  if curl -fsS "http://localhost:${port:-8080}/healthz" >/dev/null; then
+    info "Container is up and /healthz responds."
+  else
+    warn "Container started but /healthz did not respond yet; run: docker compose logs -f"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Optional TLS proxy
+# ---------------------------------------------------------------------------
+setup_caddy() {
+  [ -n "$DOMAIN" ] || return
+  info "Setting up Caddy TLS reverse proxy for ${DOMAIN}…"
+  if ! command -v caddy >/dev/null 2>&1; then
+    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https >/dev/null
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+    apt-get update -qq && apt-get install -y -qq caddy >/dev/null
+  fi
+  cat > /etc/caddy/Caddyfile <<EOF
+${DOMAIN} {
+    reverse_proxy localhost:8080
+}
+EOF
+  systemctl reload caddy || systemctl restart caddy
+  info "Caddy is serving https://${DOMAIN} (auto Let's Encrypt cert)."
+}
+
+# ---------------------------------------------------------------------------
+# GitLab checklist + pause + self-test
+# ---------------------------------------------------------------------------
+public_url() {
+  if [ -n "$DOMAIN" ]; then echo "https://${DOMAIN}"; return; fi
+  local ip; ip="$(curl -fsS https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
+  echo "http://${ip:-<THIS_VM_IP>}:8080"
+}
+
+print_gitlab_checklist() {
+  local url secret
+  url="$(public_url)"
+  secret="${GENERATED_SECRET:-<your GITLAB_WEBHOOK_SECRET>}"
+  cat <<EOF
+
+${c_bold}════════════════════════ GitLab setup (do this now) ════════════════════════${c_reset}
+ 1. Create/confirm the bot user  "${CLAUDE_BOT_USERNAME:-claude-bot}"  and add it to each
+    target project as  Developer  (can push branches + open MRs).
+
+ 2. Create a project or group  access token  with scope:  api
+       (you already provided this token to the installer)
+
+ 3. In each project (or the group):  Settings → Webhooks → Add webhook
+       URL:           ${url}/webhook
+       Secret token:  ${secret}
+       Trigger:       [x] Issues events   (leave everything else unchecked)
+       SSL verify:    [x] recommended (needs a TLS domain — see --domain)
+
+ 4. (Optional) Add a CLAUDE.md to each repo with your coding standards.
+${c_bold}═════════════════════════════════════════════════════════════════════════════${c_reset}
+
+EOF
+}
+
+pause_for_gitlab() {
+  if [ ! -t 0 ]; then
+    warn "Non-interactive run: skipping the ENTER pause. Complete the GitLab steps above."
+    return
+  fi
+  read -r -p "⏸  Complete the GitLab steps above, then press ENTER to run a self-test… " _
+}
+
+self_test() {
+  info "Running connectivity self-test…"
+  # shellcheck disable=SC1090
+  set -a; . "$ENV_FILE"; set +a
+  local code
+  code="$(curl -fsS -o /dev/null -w '%{http_code}' \
+    --header "PRIVATE-TOKEN: ${GITLAB_BOT_TOKEN}" \
+    "${GITLAB_BASE_URL%/}/api/v4/user" || true)"
+  if [ "$code" = "200" ]; then
+    info "✅ Bot token is valid (GitLab /user returned 200)."
+  else
+    warn "❌ GitLab /user returned HTTP ${code:-000}. Check GITLAB_BASE_URL / token scope."
+  fi
+}
+
+print_done() {
+  cat <<EOF
+
+${c_green}${c_bold}Done.${c_reset} The ${APP_NAME} is running.
+
+  Webhook URL:   $(public_url)/webhook
+  Config:        ${ENV_FILE}
+EOF
+  if [ "$MODE" = "docker" ]; then
+    echo "  Logs:          cd ${APP_DIR} && docker compose logs -f"
+    echo "  Restart:       cd ${APP_DIR} && docker compose restart"
+  else
+    echo "  Logs:          journalctl -u ${APP_NAME} -f"
+    echo "  Restart:       systemctl restart ${APP_NAME}"
+  fi
+  echo
+}
+
+# ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
+uninstall() {
+  info "Uninstalling ${APP_NAME}…"
+  if [ "$MODE" = "docker" ] && command -v docker >/dev/null 2>&1 && [ -d "$APP_DIR" ]; then
+    ( cd "$APP_DIR" && docker compose down 2>/dev/null || true )
+  fi
+  systemctl disable --now "$APP_NAME" 2>/dev/null || true
+  rm -f "$SERVICE_FILE"; systemctl daemon-reload 2>/dev/null || true
+  rm -rf "$APP_DIR"
+  if [ "$DO_PURGE" -eq 1 ]; then
+    rm -f "$ENV_FILE"
+    if id "$APP_USER" >/dev/null 2>&1; then userdel -r "$APP_USER" 2>/dev/null || true; fi
+    info "Purged config, data, and user."
+  else
+    info "Left ${ENV_FILE} and user '${APP_USER}' in place (use --purge to remove)."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+  parse_args "$@"
+  need_root
+
+  if [ "$DO_UNINSTALL" -eq 1 ]; then
+    uninstall
+    exit 0
+  fi
+
+  preflight
+  install_base_packages
+  ensure_user
+  fetch_app
+  write_env
+
+  if [ "$MODE" = "docker" ]; then
+    install_docker
+  else
+    install_node
+    build_app
+    install_service
+  fi
+
+  setup_caddy
+  print_gitlab_checklist
+  pause_for_gitlab
+  self_test
+  print_done
+}
+
+main "$@"

@@ -1,0 +1,25 @@
+[Unit]
+Description=GitLab Claude Agent Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude-agent
+Group=claude-agent
+WorkingDirectory=/opt/gitlab-claude-agent
+EnvironmentFile=/etc/gitlab-claude-agent.env
+ExecStart=/usr/bin/node /opt/gitlab-claude-agent/dist/index.js
+Restart=always
+RestartSec=3
+
+# --- Hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# The service needs to write its workspaces + queue under its home.
+ReadWritePaths=/opt/gitlab-claude-agent/workspaces /opt/gitlab-claude-agent/data
+
+[Install]
+WantedBy=multi-user.target

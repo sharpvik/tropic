@@ -538,13 +538,23 @@ setup_projects() {
       warn "  [${p}] no admin token available — add '${CLAUDE_BOT_USERNAME}' as Developer manually."
     fi
 
-    # 2. Create the Issues webhook (idempotent: skip if one with this URL exists).
+    # 2. Create-or-update the Issues webhook. If one with this URL exists we PUT to
+    #    it so its secret/settings match the current config (self-heals token drift).
     gl_api GET "/projects/${enc}/hooks" "$token"
     existing=""
     [ "$GL_CODE" = "200" ] && existing="$(echo "$GL_BODY" | jq -r --arg u "$hook_url" '.[] | select(.url==$u) | .id' 2>/dev/null | head -n1)"
     if [ -n "$existing" ]; then
-      info "  [${p}] webhook already present (id ${existing})."
-      hook_ok=1
+      gl_api PUT "/projects/${enc}/hooks/${existing}" "$token" \
+        --data-urlencode "url=${hook_url}" \
+        --data-urlencode "token=${GITLAB_WEBHOOK_SECRET}" \
+        --data-urlencode "issues_events=true" \
+        --data-urlencode "push_events=false" \
+        --data-urlencode "enable_ssl_verification=${ssl}"
+      if [ "$GL_CODE" = "200" ]; then
+        info "  [${p}] webhook updated (id ${existing}) — secret synced."; hook_ok=1
+      else
+        warn "  [${p}] webhook exists (id ${existing}) but update failed (HTTP ${GL_CODE}: $(gl_err_msg "$GL_BODY"))."
+      fi
     else
       gl_api POST "/projects/${enc}/hooks" "$token" \
         --data-urlencode "url=${hook_url}" \

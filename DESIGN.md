@@ -289,10 +289,15 @@ idempotent (safe to re-run), interactive only where a human decision is unavoida
 (secrets), and prints the exact GitLab-side steps it cannot do itself — then waits for
 `ENTER` before finishing.
 
+**Deployment default: Docker.** The container is the isolation boundary, so the agent runs
+with full privileges inside it — Claude can install packages, build, and test without the
+host sandbox/permission problems an unprivileged systemd service hits. `--native` selects
+the systemd path instead (unprivileged; no `sudo` in repo builds).
+
 ### 14.1 The one command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/gitlab-claude-agent/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh | sudo bash
 ```
 
 That's it. For the security-conscious, the equivalent two-step (inspect, then run):
@@ -467,10 +472,12 @@ volumes:
 
 - **Persisted state:** `/data` (queue) and `/workspaces` (repo mirrors) are named volumes so
   the queue backlog and cached clones survive `docker restart`/image upgrades.
-- **`install.sh --docker`:** the installer offers a Docker path too — it installs Docker
-  Engine if absent, writes the same `.env`, pulls the image, and starts the compose stack,
-  then prints the identical GitLab checklist + ENTER pause (§14.3). Same UX, container runtime.
+- **`install.sh` (Docker is the default):** installs Docker Engine if absent, writes the
+  `.env`, builds the image, and starts the compose stack, then prints the GitLab checklist +
+  ENTER pause (§14.3). `--native` switches to the systemd path.
+- **Runs as root inside the container.** The container is the isolation boundary, so the
+  agent runs privileged within it — Claude's Bash can install packages and build/test freely,
+  with a writable `HOME` (`~/.claude` + toolchain caches). The host is protected by the
+  container, not by dropping privileges inside it.
 - **Per-job isolation (future):** §12 open question 2 — for many-repo deployments, run each
-  job in an ephemeral child container (docker-in-docker or a sibling socket) so a repo's Bash
-  can't see the service or other repos. The base image above already runs the service as
-  non-root as a first step.
+  job in an ephemeral child container so a repo's Bash can't see the service or other repos.

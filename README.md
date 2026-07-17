@@ -8,16 +8,23 @@ See [`DESIGN.md`](./DESIGN.md) for the full design.
 
 ## Quick start (fresh Ubuntu VM)
 
-Native (systemd) install, one command:
+One command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sharpvik/tropic/main/install.sh | sudo bash
 ```
 
-The installer sets up Node, a dedicated `claude-agent` user, the systemd service, and your
-config, then **prints the GitLab-side checklist and waits for you to press ENTER** before
-running a connectivity self-test. (To pass flags through a piped run, append
-`-s -- <flags>`, e.g. `… | sudo bash -s -- --domain agent.example.com`.)
+By default this deploys with **Docker** — it installs Docker if needed, builds the image,
+provisions your config, and runs `docker compose up -d`. The container runs the agent with
+full privileges inside its own sandbox, so Claude can build/test freely (install packages,
+write caches) without the host permission and systemd-sandbox issues a bare-metal service
+hits. Then it **prints the GitLab-side checklist and waits for you to press ENTER** before a
+connectivity self-test. (To pass flags through a piped run, append `-s -- <flags>`, e.g.
+`… | sudo bash -s -- --domain agent.example.com`.)
+
+Prefer a bare-metal **systemd** service instead? Add `--native` (installs Node + a
+dedicated `claude-agent` user + the unit). Note the native service runs unprivileged, so
+repo builds that need `sudo`/system packages won't work there — Docker is recommended.
 
 ### Bot identity: auto-created bot user (default)
 
@@ -44,11 +51,12 @@ Flags (see `DESIGN.md` §14):
 - `--project <id|group/repo>` — auto-wire a project: add the bot as Developer **and**
   create the Issues webhook (repeatable). With this, the install is fully hands-off — no
   manual GitLab UI steps.
-- `--repo <git-url>` — source repo to clone (defaults to a placeholder; set this)
+- `--native` — install as a systemd service instead of Docker (unprivileged; no `sudo`)
+- `--docker` — force the Docker deployment (the default)
+- `--repo <git-url>` — source repo to clone (defaults to this project; for forks/local paths)
 - `--ref <git-ref>` — branch/tag to install (default `main`)
 - `--domain example.com` — provision a Caddy TLS reverse proxy + real cert
-- `--docker` — run as a container instead of a native systemd service
-- `--uninstall [--purge]` — remove the service
+- `--uninstall [--purge]` — remove the deployment
 
 ### Get HTTPS for the webhook
 
@@ -74,6 +82,17 @@ ssh user@vm 'sudo REPO_URL=/tmp/tropic bash /tmp/tropic/install.sh'
 ```
 
 ### Manage the service
+
+Docker (default):
+
+```bash
+cd /opt/gitlab-claude-agent
+docker compose logs -f       # logs
+docker compose restart       # restart
+docker compose ps            # status
+```
+
+Native (`--native`):
 
 ```bash
 journalctl -u gitlab-claude-agent -f    # logs

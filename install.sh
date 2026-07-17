@@ -17,7 +17,10 @@
 #                       --service-account; needs group Owner + Premium).
 #   --project <id|path> Auto-wire this project: add the bot as Developer AND create
 #                       the Issues webhook. Repeatable. (Uses the one-time admin token.)
-#   --docker            Install via Docker instead of a native systemd service.
+#   --native            Install as a native systemd service instead of Docker (default
+#                       is Docker: the container runs the agent with full privileges,
+#                       avoiding host sandbox/permission issues).
+#   --docker            Force the Docker deployment (this is the default).
 #   --domain <fqdn>     Set up a Caddy TLS reverse proxy for this domain.
 #   --repo <git-url>    Override the source repo to clone (default: this project;
 #                       only needed for forks or a local path).
@@ -37,7 +40,7 @@ ENV_FILE="/etc/${APP_NAME}.env"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 REPO_URL="${REPO_URL:-https://github.com/sharpvik/tropic.git}"
 REPO_REF="main"
-MODE="native"
+MODE="docker"   # default deployment; --native switches to systemd
 DOMAIN=""
 DO_UNINSTALL=0
 DO_PURGE=0
@@ -91,6 +94,7 @@ parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --docker) MODE="docker" ;;
+      --native) MODE="native" ;;
       --domain) DOMAIN="$2"; shift ;;
       --repo) REPO_URL="$2"; shift ;;
       --ref) REPO_REF="$2"; shift ;;
@@ -153,7 +157,8 @@ fetch_app() {
     git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$APP_DIR"
   fi
   mkdir -p "${APP_DIR}/workspaces" "${APP_DIR}/data"
-  chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+  # Native runs as the service user; Docker owns its own volumes, so leave as root.
+  id "$APP_USER" >/dev/null 2>&1 && chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
 }
 
 build_app() {
@@ -376,6 +381,10 @@ write_env() {
     info "Generated a webhook secret (shown in the GitLab checklist below)."
   fi
 
+  # NOTE: WORKSPACES_DIR/DATA_DIR are intentionally NOT written here — the app picks
+  # the right defaults per deployment (native: ./workspaces & ./data under the systemd
+  # WorkingDirectory; Docker: /workspaces & /data from the image ENV + volumes). Writing
+  # them would let env_file override the container's own paths when switching modes.
   umask 077
   cat > "$ENV_FILE" <<EOF
 PORT=8080
@@ -387,12 +396,11 @@ ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 MAX_CONCURRENCY=2
 JOB_TIMEOUT_MS=1800000
 MAX_TURNS=40
-WORKSPACES_DIR=${APP_DIR}/workspaces
-DATA_DIR=${APP_DIR}/data
 BOT_GIT_USERNAME=${CLAUDE_BOT_USERNAME}
 BOT_GIT_EMAIL=${CLAUDE_BOT_USERNAME}@users.noreply.gitlab
 EOF
-  chown "$APP_USER":"$APP_USER" "$ENV_FILE"
+  # Own the env file by the service user when it exists (native); root otherwise.
+  id "$APP_USER" >/dev/null 2>&1 && chown "$APP_USER":"$APP_USER" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   info "Wrote ${ENV_FILE} (chmod 600)."
 }
@@ -645,7 +653,8 @@ EOF
 # ---------------------------------------------------------------------------
 uninstall() {
   info "Uninstalling ${APP_NAME}…"
-  if [ "$MODE" = "docker" ] && command -v docker >/dev/null 2>&1 && [ -d "$APP_DIR" ]; then
+  # Tear down whichever deployment is present (don't rely on --docker/--native here).
+  if command -v docker >/dev/null 2>&1 && [ -f "${APP_DIR}/docker-compose.yml" ]; then
     ( cd "$APP_DIR" && docker compose down 2>/dev/null || true )
   fi
   systemctl disable --now "$APP_NAME" 2>/dev/null || true
@@ -654,9 +663,12 @@ uninstall() {
   if [ "$DO_PURGE" -eq 1 ]; then
     rm -f "$ENV_FILE"
     if id "$APP_USER" >/dev/null 2>&1; then userdel -r "$APP_USER" 2>/dev/null || true; fi
-    info "Purged config, data, and user."
+    if command -v docker >/dev/null 2>&1; then
+      docker volume rm gitlab-claude-agent_claude-data gitlab-claude-agent_claude-workspaces 2>/dev/null || true
+    fi
+    info "Purged config, data, user, and Docker volumes."
   else
-    info "Left ${ENV_FILE} and user '${APP_USER}' in place (use --purge to remove)."
+    info "Left ${ENV_FILE}, user '${APP_USER}', and Docker volumes in place (use --purge to remove)."
   fi
 }
 
@@ -674,7 +686,7 @@ main() {
 
   preflight
   install_base_packages
-  ensure_user
+  [ "$MODE" = "native" ] && ensure_user
   fetch_app
   write_env
 

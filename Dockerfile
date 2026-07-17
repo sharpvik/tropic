@@ -9,9 +9,13 @@ RUN npm run build
 
 # ---- runtime stage ----
 FROM node:22-bookworm-slim
-# git: required for the worktree pipeline. ca-certificates: HTTPS push/API.
+# git + build basics for the worktree pipeline and for Claude to build/test repos.
+# The container itself is the isolation boundary, so we run as root inside it: the
+# agent's Bash tool can install packages, run builds, and use a fully writable HOME
+# without the sandbox/permission problems a locked-down host service would hit.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
+ && apt-get install -y --no-install-recommends \
+      git ca-certificates curl build-essential python3 \
  && rm -rf /var/lib/apt/lists/*
 # Claude Code CLI, available to the agent's Bash tool inside worktrees.
 RUN npm install -g @anthropic-ai/claude-code || true
@@ -21,13 +25,11 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 
-# Non-root runtime user; owns the mutable dirs.
-RUN useradd --create-home --uid 10001 claude \
- && mkdir -p /data /workspaces \
- && chown -R claude /data /workspaces /app
-USER claude
+RUN mkdir -p /data /workspaces
 
+# Runs as root (uid 0). HOME is writable for ~/.claude + toolchain caches.
 ENV NODE_ENV=production \
+    HOME=/root \
     PORT=8080 \
     DATA_DIR=/data \
     WORKSPACES_DIR=/workspaces

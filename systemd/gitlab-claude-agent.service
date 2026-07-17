@@ -9,17 +9,25 @@ User=claude-agent
 Group=claude-agent
 WorkingDirectory=/opt/gitlab-claude-agent
 EnvironmentFile=/etc/gitlab-claude-agent.env
+# HOME must be writable: the Claude CLI stores per-session shell state under
+# ~/.claude, and toolchains cache under ~/.npm, ~/.cache, ~/.cargo, etc.
+Environment=HOME=/home/claude-agent
 ExecStart=/usr/bin/node /opt/gitlab-claude-agent/dist/index.js
 Restart=always
 RestartSec=3
 
 # --- Hardening ---
+# Intentionally light. Claude runs arbitrary build/test commands in the worktree
+# and must read/write the filesystem freely (HOME caches, /tmp, the repo). We keep
+# only the guards that don't impede that:
+#   - runs as the unprivileged 'claude-agent' user (cannot touch other users' files)
+#   - NoNewPrivileges: no setuid/sudo escalation
+#   - PrivateTmp: an isolated (but writable) /tmp per service
+# We deliberately DO NOT set ProtectHome/ProtectSystem/ReadWritePaths — they broke
+# the Bash tool and toolchain caches. For stronger isolation, run the Docker image
+# (or per-job containers) instead; see DESIGN.md §9.
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-# The service needs to write its workspaces + queue under its home.
-ReadWritePaths=/opt/gitlab-claude-agent/workspaces /opt/gitlab-claude-agent/data
 
 [Install]
 WantedBy=multi-user.target

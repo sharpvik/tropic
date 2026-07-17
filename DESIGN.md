@@ -216,6 +216,13 @@ WORKSPACES_DIR=./workspaces
   shapes: (a) native install under `systemd`, (b) Docker container. §14 covers both.
 - **Process supervision:** `systemd` unit (provided) — `Restart=always`, runs as a
   dedicated `claude-agent` user, `EnvironmentFile=/etc/gitlab-claude-agent.env`.
+- **Sandboxing is intentionally light in the native unit.** Claude executes arbitrary
+  build/test commands in the worktree and needs free filesystem access (a writable `HOME`
+  for `~/.claude` + toolchain caches, `/tmp`, the repo). So the unit keeps only
+  `NoNewPrivileges` + `PrivateTmp` + the unprivileged user; it does **not** set
+  `ProtectHome`/`ProtectSystem`/`ReadWritePaths` (those disable the agent's Bash tool). If
+  you need real isolation, run the Docker image or per-job containers (§9, §15) rather than
+  tightening the systemd unit — a locked-down unit and a working agent are at odds.
 - **Logging:** structured JSON (pino) → journald; one correlation id per job.
 - **Health:** `GET /healthz` for a load balancer / uptime check.
 - **Backpressure:** if the queue exceeds a threshold, new webhooks still 200 but the job

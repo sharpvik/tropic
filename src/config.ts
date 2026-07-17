@@ -16,8 +16,8 @@ const ConfigSchema = z.object({
   ANTHROPIC_MODEL: z.string().min(1).optional(),
 
   MAX_CONCURRENCY: z.coerce.number().int().positive().default(2),
-  // Wall-clock cap per job in ms; 0 disables the timeout (run unbounded).
-  JOB_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(1_800_000),
+  // Wall-clock cap per job in ms; generous by default (4h). 0 disables it entirely.
+  JOB_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(14_400_000),
 
   WORKSPACES_DIR: z.string().min(1).default("./workspaces"),
   DATA_DIR: z.string().min(1).default("./data"),

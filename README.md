@@ -105,7 +105,7 @@ worktree — i.e. CI-runner load, `MAX_CONCURRENCY` of them at once.
 
 Rule of thumb: `RAM ≈ 1 GB + MAX_CONCURRENCY × (peak RAM of one build+test run)`. Prefer
 more RAM over vCPU (OOM mid-build fails jobs; CPU starvation just slows them), add ~2 GB
-swap, and note that a stuck job holds its slot for the full `JOB_TIMEOUT_MS` (default 30 min).
+swap, and note that a stuck job holds its slot for the full `JOB_TIMEOUT_MS` (default 4h; `0` disables it).
 
 ## Run with Docker
 

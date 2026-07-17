@@ -153,7 +153,7 @@ Notes:
 - **`cwd` = the isolated worktree** so Claude only sees that repo.
 - `CLAUDE.md` at repo root carries coding standards — Claude reads it automatically.
 - **No turn cap.** The agent runs to completion; the only guard is the wall-clock
-  `JOB_TIMEOUT_MS` (default 30 min, set `0` to disable). Isolation (container + worktree)
+  `JOB_TIMEOUT_MS` (default 4h, set `0` to disable). Isolation (container + worktree)
   is what bounds blast radius, not a turn/permission limit.
 
 ---
@@ -196,8 +196,7 @@ GITLAB_BOT_TOKEN=<personal/project access token, api scope>
 CLAUDE_BOT_USERNAME=claude-bot
 ANTHROPIC_API_KEY=<key>
 MAX_CONCURRENCY=2
-JOB_TIMEOUT_MS=1800000
-WORKSPACES_DIR=./workspaces
+JOB_TIMEOUT_MS=14400000   # 4h; 0 = unbounded
 ```
 
 ---

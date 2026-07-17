@@ -78,8 +78,17 @@ export async function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
       prompt,
       options: {
         cwd: opts.worktreeDir,
-        permissionMode: "acceptEdits",
-        allowedTools: ["Bash", "Read", "Edit", "Write", "Grep", "Glob"],
+        // Use Claude Code's real system prompt (not a bare one) — this is what makes
+        // the agent behave like Claude Code rather than a model with a few tools.
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        // Load project settings so repo CLAUDE.md / .claude config apply.
+        settingSources: ["project"],
+        // Run fully autonomous: pre-approve every tool (no interactive prompts). Safe
+        // because each job runs in an isolated container + throwaway git worktree.
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // No allowedTools restriction → the full default toolset (Bash, Edit, Write,
+        // Read, Grep, Glob, TodoWrite, Task/subagents, WebFetch, WebSearch, Skills…).
         maxTurns: opts.maxTurns,
         ...(opts.model ? { model: opts.model } : {}),
         abortController: controller,

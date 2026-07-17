@@ -86,4 +86,31 @@ describe("GitOps mirror + worktree pipeline", () => {
     expect(await fs.readFile(join(wt.dir, "README.md"), "utf8")).toContain("hello");
     await wt.cleanup();
   });
+
+  it("re-fetches while a branch is checked out, and re-runs the same branch (regression)", async () => {
+    const ops = new GitOps({
+      workspacesDir: join(root, "ws"),
+      botUsername: "claude-bot",
+      botEmail: "claude-bot@example.com",
+      logger,
+    });
+
+    await ops.ensureMirror(remote, "grp/proj");
+    // Job A: create a worktree, commit + push its branch — branch is now checked out.
+    const a = await ops.createWorktree("grp/proj", "main", "claude/issue-14-admin-api");
+    await fs.writeFile(join(a.dir, "A.md"), "a\n");
+    await ops.commitAll(a.dir, "a");
+    await ops.push(a.dir, "claude/issue-14-admin-api");
+
+    // Previously this threw: "refusing to fetch into branch … checked out at …".
+    // With remote-tracking refs it must succeed while A's worktree is still live.
+    await expect(ops.ensureMirror(remote, "grp/proj")).resolves.toBeDefined();
+
+    // Re-running the SAME branch (e.g. a retried job) must not fail on an existing branch.
+    const a2 = await ops.createWorktree("grp/proj", "main", "claude/issue-14-admin-api");
+    expect(await fs.readFile(join(a2.dir, "README.md"), "utf8")).toContain("hello");
+
+    await a.cleanup().catch(() => undefined);
+    await a2.cleanup();
+  });
 });

@@ -86,7 +86,23 @@ export class GitOps {
     return join(this.workspacesDir, safeName(projectPath), ".git-mirror");
   }
 
-  /** Ensure a bare mirror exists and is up to date. */
+  private worktreeDir(projectPath: string, branch: string): string {
+    return join(
+      this.workspacesDir,
+      safeName(projectPath),
+      "wt",
+      branch.replace(/[^a-zA-Z0-9._-]+/g, "_"),
+    );
+  }
+
+  /**
+   * Ensure a bare repo exists and is up to date.
+   *
+   * We fetch upstream branches into remote-tracking refs (`refs/remotes/origin/*`),
+   * NOT into local `refs/heads/*`. Local heads are only ever created by worktrees,
+   * so `git fetch` never collides with a checked-out branch — which is what let
+   * concurrent jobs (and re-runs) break the shared mirror.
+   */
   async ensureMirror(repoUrl: string, projectPath: string): Promise<string> {
     const dir = this.mirrorDir(projectPath);
     const exists = await fs
@@ -95,12 +111,21 @@ export class GitOps {
       .catch(() => false);
     if (!exists) {
       await fs.mkdir(join(this.workspacesDir, safeName(projectPath)), { recursive: true });
-      await this.git(["clone", "--mirror", repoUrl, dir]);
+      await this.git(["init", "--bare", dir]);
+      await this.git(["remote", "add", "origin", repoUrl], dir).catch(async () => {
+        await this.git(["remote", "set-url", "origin", repoUrl], dir);
+      });
     } else {
-      // Refresh remote URL (token may have rotated) and fetch.
       await this.git(["remote", "set-url", "origin", repoUrl], dir);
-      await this.git(["fetch", "--prune", "origin"], dir);
     }
+    // Configure remote-tracking fetch + drop any legacy --mirror settings so existing
+    // mirrors self-heal to the new layout.
+    await this.git(["config", "remote.origin.mirror", "false"], dir).catch(() => undefined);
+    await this.git(
+      ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+      dir,
+    );
+    await this.git(["fetch", "--prune", "origin"], dir);
     return dir;
   }
 
@@ -114,53 +139,41 @@ export class GitOps {
     branch: string,
   ): Promise<WorktreeHandle> {
     const mirror = this.mirrorDir(projectPath);
-    const dir = join(
-      this.workspacesDir,
-      safeName(projectPath),
-      "wt",
-      branch.replace(/[^a-zA-Z0-9._-]+/g, "_"),
-    );
-    // Clean any stale worktree at that path.
+    const dir = this.worktreeDir(projectPath, branch);
     await this.removeWorktreeAt(mirror, dir).catch(() => undefined);
-    // A --mirror clone stores upstream branches as real refs (refs/heads/<branch>),
-    // so the base is the plain branch name, NOT origin/<branch> (no remote-tracking
-    // refs exist in a mirror).
+    // -B: (re)create the local branch off the remote-tracking base, so re-runs of the
+    // same issue don't fail on an existing branch.
     await this.git(
-      ["worktree", "add", "-b", branch, dir, baseBranch],
+      ["worktree", "add", "-B", branch, dir, `origin/${baseBranch}`],
       mirror,
     );
-    // Set commit identity local to the worktree.
-    await this.git(["config", "user.name", this.botUsername], dir);
-    await this.git(["config", "user.email", this.botEmail], dir);
-
-    return {
-      dir,
-      branch,
-      cleanup: () => this.removeWorktreeAt(mirror, dir),
-    };
+    await this.setIdentity(dir);
+    return { dir, branch, cleanup: () => this.removeWorktreeAt(mirror, dir) };
   }
 
   /**
-   * Create a worktree that checks out an EXISTING branch (e.g. an MR's source
-   * branch) so commits land on that same branch. Caller must invoke `cleanup()`.
+   * Create a worktree for an EXISTING upstream branch (e.g. an MR's source branch)
+   * so commits land on it. Caller must invoke `cleanup()`.
    */
   async createWorktreeFromExisting(
     projectPath: string,
     branch: string,
   ): Promise<WorktreeHandle> {
     const mirror = this.mirrorDir(projectPath);
-    const dir = join(
-      this.workspacesDir,
-      safeName(projectPath),
-      "wt",
-      branch.replace(/[^a-zA-Z0-9._-]+/g, "_"),
-    );
+    const dir = this.worktreeDir(projectPath, branch);
     await this.removeWorktreeAt(mirror, dir).catch(() => undefined);
-    // No -b: check out the existing branch (present as refs/heads/<branch> in the mirror).
-    await this.git(["worktree", "add", dir, branch], mirror);
+    // -B resets the local branch to the fetched upstream tip and checks it out.
+    await this.git(
+      ["worktree", "add", "-B", branch, dir, `origin/${branch}`],
+      mirror,
+    );
+    await this.setIdentity(dir);
+    return { dir, branch, cleanup: () => this.removeWorktreeAt(mirror, dir) };
+  }
+
+  private async setIdentity(dir: string): Promise<void> {
     await this.git(["config", "user.name", this.botUsername], dir);
     await this.git(["config", "user.email", this.botEmail], dir);
-    return { dir, branch, cleanup: () => this.removeWorktreeAt(mirror, dir) };
   }
 
   private async removeWorktreeAt(mirror: string, dir: string): Promise<void> {
@@ -183,11 +196,6 @@ export class GitOps {
 
   /** Push the branch to origin. */
   async push(worktreeDir: string, branch: string): Promise<void> {
-    // The mirror clone sets remote.origin.mirror=true, which forbids pushing with a
-    // refspec ("--mirror can't be combined with refspecs"). Override it per-command.
-    await this.git(
-      ["-c", "remote.origin.mirror=false", "push", "-u", "origin", `${branch}:${branch}`],
-      worktreeDir,
-    );
+    await this.git(["push", "-u", "origin", `${branch}:${branch}`], worktreeDir);
   }
 }

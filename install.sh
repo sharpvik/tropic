@@ -158,7 +158,9 @@ fetch_app() {
   fi
   mkdir -p "${APP_DIR}/workspaces" "${APP_DIR}/data"
   # Native runs as the service user; Docker owns its own volumes, so leave as root.
-  id "$APP_USER" >/dev/null 2>&1 && chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+  if id "$APP_USER" >/dev/null 2>&1; then
+    chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+  fi
 }
 
 build_app() {
@@ -400,7 +402,9 @@ BOT_GIT_USERNAME=${CLAUDE_BOT_USERNAME}
 BOT_GIT_EMAIL=${CLAUDE_BOT_USERNAME}@users.noreply.gitlab
 EOF
   # Own the env file by the service user when it exists (native); root otherwise.
-  id "$APP_USER" >/dev/null 2>&1 && chown "$APP_USER":"$APP_USER" "$ENV_FILE"
+  if id "$APP_USER" >/dev/null 2>&1; then
+    chown "$APP_USER":"$APP_USER" "$ENV_FILE"
+  fi
   chmod 600 "$ENV_FILE"
   info "Wrote ${ENV_FILE} (chmod 600)."
 }
@@ -461,7 +465,7 @@ install_docker() {
 # Optional TLS proxy
 # ---------------------------------------------------------------------------
 setup_caddy() {
-  [ -n "$DOMAIN" ] || return
+  [ -n "$DOMAIN" ] || return 0
   info "Setting up Caddy TLS reverse proxy for ${DOMAIN}…"
   if ! command -v caddy >/dev/null 2>&1; then
     apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https >/dev/null
@@ -553,8 +557,11 @@ setup_projects() {
       fi
     fi
 
-    [ "$member_ok" = 1 ] && [ "$hook_ok" = 1 ] && PROJECTS_FULLY_WIRED=$((PROJECTS_FULLY_WIRED+1))
+    if [ "$member_ok" = 1 ] && [ "$hook_ok" = 1 ]; then
+      PROJECTS_FULLY_WIRED=$((PROJECTS_FULLY_WIRED+1))
+    fi
   done
+  return 0   # never let a not-fully-wired project abort the installer (set -e)
 }
 
 print_gitlab_checklist() {
@@ -686,7 +693,7 @@ main() {
 
   preflight
   install_base_packages
-  [ "$MODE" = "native" ] && ensure_user
+  if [ "$MODE" = "native" ]; then ensure_user; fi
   fetch_app
   write_env
 

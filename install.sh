@@ -40,22 +40,26 @@ die()   { err "$*"; exit 1; }
 
 need_root() { [ "$(id -u)" -eq 0 ] || die "Please run as root (use: sudo bash install.sh)"; }
 
+# True when we have a terminal to interact with. Reads /dev/tty rather than stdin
+# so `curl … | sudo bash` (where stdin is the pipe) still prompts interactively.
+have_tty() { [ -r /dev/tty ]; }
+
 # Read a value interactively unless it's already set in the environment.
 # usage: prompt_var VAR "Prompt text" [default] [secret]
 prompt_var() {
   local var="$1" prompt="$2" default="${3:-}" secret="${4:-}"
   local current="${!var:-}"
   if [ -n "$current" ]; then return; fi
-  if [ ! -t 0 ]; then
-    # Non-interactive and unset: fall back to default or fail for required vars.
+  if ! have_tty; then
+    # No terminal available: fall back to default or fail for required vars.
     [ -n "$default" ] && { printf -v "$var" '%s' "$default"; return; }
-    die "$var is required but stdin is not a TTY (set it in the environment)."
+    die "$var is required but no TTY is available (set it in the environment)."
   fi
   local input
   if [ -n "$secret" ]; then
-    read -r -s -p "${prompt}: " input; echo
+    read -r -s -p "${prompt}: " input < /dev/tty; echo
   else
-    read -r -p "${prompt}${default:+ [$default]}: " input
+    read -r -p "${prompt}${default:+ [$default]}: " input < /dev/tty
   fi
   printf -v "$var" '%s' "${input:-$default}"
 }
@@ -281,11 +285,11 @@ EOF
 }
 
 pause_for_gitlab() {
-  if [ ! -t 0 ]; then
+  if ! have_tty; then
     warn "Non-interactive run: skipping the ENTER pause. Complete the GitLab steps above."
     return
   fi
-  read -r -p "⏸  Complete the GitLab steps above, then press ENTER to run a self-test… " _
+  read -r -p "⏸  Complete the GitLab steps above, then press ENTER to run a self-test… " _ < /dev/tty
 }
 
 self_test() {
